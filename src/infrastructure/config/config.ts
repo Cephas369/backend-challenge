@@ -11,6 +11,8 @@ const environmentSchema = z.object({
   DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
   DATABASE_POOL_MAX: z.coerce.number().int().positive().default(10),
   DATABASE_CONNECT_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
+  DATABASE_LOCK_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
+  DATABASE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
   AWS_REGION: z.string().min(1).default('us-east-1'),
   SQS_ENDPOINT: z.url().optional(),
   SQS_WAGER_QUEUE: fifoQueueName.default('wager-transactions.fifo'),
@@ -27,6 +29,9 @@ export interface DatabaseConfig {
   readonly url: string;
   readonly poolMax: number;
   readonly connectTimeoutMs: number;
+  /** Espera máxima por um lock de linha antes de desistir como falha transitória. */
+  readonly lockTimeoutMs: number;
+  readonly statementTimeoutMs: number;
 }
 
 export interface SqsConfig {
@@ -71,6 +76,8 @@ export function loadConfig(environment: Record<string, string | undefined>): App
       url: env.DATABASE_URL,
       poolMax: env.DATABASE_POOL_MAX,
       connectTimeoutMs: env.DATABASE_CONNECT_TIMEOUT_MS,
+      lockTimeoutMs: env.DATABASE_LOCK_TIMEOUT_MS,
+      statementTimeoutMs: env.DATABASE_STATEMENT_TIMEOUT_MS,
     },
     sqs: {
       region: env.AWS_REGION,

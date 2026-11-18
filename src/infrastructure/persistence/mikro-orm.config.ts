@@ -4,6 +4,8 @@ import { defineConfig, type Options } from '@mikro-orm/postgresql';
 import type { DatabaseConfig } from '../config/config';
 import type { AppLogger } from '../observability/logger';
 import { migrationsList } from './migrations';
+import { PinoMikroOrmLogger } from './mikro-orm-logger';
+import { PERSISTENCE_SCHEMAS } from './schema';
 
 export interface OrmOptionsOverrides {
   /** Permite que testes rodem migrations próprias contra um banco descartável. */
@@ -17,8 +19,7 @@ export function buildOrmOptions(
 ): Options {
   return defineConfig({
     clientUrl: config.url,
-    entities: [],
-    discovery: { warnWhenNoEntities: false },
+    entities: [...PERSISTENCE_SCHEMAS],
     extensions: [Migrator],
     // o banco é criado pela infraestrutura (compose/testes), nunca pela aplicação
     ensureDatabase: false,
@@ -27,7 +28,8 @@ export function buildOrmOptions(
     forceUtcTimezone: true,
     pool: { min: 0, max: config.poolMax },
     driverOptions: { connectionTimeoutMillis: config.connectTimeoutMs },
-    logger: (message) => logger.warn({ component: 'mikro-orm' }, message),
+    loggerFactory: () => new PinoMikroOrmLogger(logger),
+    colors: false,
     migrations: {
       tableName: 'mikro_orm_migrations',
       migrationsList: overrides.migrationsList ?? migrationsList,

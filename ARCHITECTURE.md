@@ -2,15 +2,15 @@
 
 Este documento registra as decisões técnicas do Distributed Wagering Processor à medida que são tomadas: o contexto, a escolha e o que ela implica.
 
-**Estado atual:** o domínio está completo e coberto por testes de unidade, mas ainda não está ligado à persistência nem à API.
+**Estado atual:** o domínio grava e lê do PostgreSQL pelas portas da aplicação, e o schema impõe as invariantes por conta própria. A API e os use cases ainda não existem.
 
 ## Estrutura
 
 ```
 src/
   domain/          TypeScript puro: money, wallet, wagering, events, messaging, shared
-  application/     use cases e portas
-  infrastructure/  config, observabilidade, persistência (MikroORM), SQS
+  application/     portas (repositórios, UnitOfWork) e erros de aplicação
+  infrastructure/  config, observabilidade, persistência (schema, mappers, repositórios, migrations), SQS
   interfaces/      HTTP (health, correlation id)
 test/
   unit/            sem dependências externas
@@ -156,6 +156,55 @@ Erros de contrato não viram transação; na API eles viram respostas 400 com o 
 - **Eventos:** `IntegrationEvent` é abstrata, com uma subclasse por evento que fixa `eventType` e `version` no tipo. `data` só leva `MoneyProps`, nunca `Money`, e é clonado e congelado. O `aggregateId` é o `transactionId` nos eventos de transação e o `walletId` no `WalletBalanceChanged`. Como o `MessageGroupId` da publicação será o `aggregateId`, a ordem por wallet se mantém onde importa; e a `walletVersion` no evento permite ordenar mesmo assim.
 - **Outbox:** o id da mensagem é o `eventId`, então republicar carrega o mesmo id, e é por ele que o consumidor deduplica. A mensagem nasce devida e, a cada falha, `scheduleRetry()` aplica backoff exponencial com jitter. Não há limite de tentativas: evento confirmado nunca é descartado, e o atraso aparece como outbox lag. O último erro fica guardado, truncado.
 - **Inbox:** a mensagem é identificada por `(consumerName, messageId)` e só pode ser marcada como processada uma vez. `matchesPayload()` detecta reuso de `messageId` com outro conteúdo.
+
+### D13. Schema: as invariantes moram no banco
+
+A [migration inicial](src/infrastructure/persistence/migrations/Migration20261119000000InitialSchema.ts) traduz para o schema cada garantia da seção 6. Cada linha da tabela é provocada diretamente no banco por [test/integration/persistence/schema.test.ts](test/integration/persistence/schema.test.ts), que confere o SQLSTATE e o nome da constraint.
+
+| Garantia | Mecanismo |
+|---|---|
+| Uma wallet por player e moeda | `wallets_player_currency_uq` |
+| Saldo nunca negativo | `CHECK` em `wallets.balance_amount` e em `balance_before/after` do ledger |
+| Idempotência | `wager_tx_idempotency_uq (provider_id, idempotency_key)` e `wager_tx_external_uq (provider_id, external_transaction_id)` |
+| Um lançamento por transação | `ledger_one_entry_per_transaction_uq` |
+| Ledger linear | `ledger_wallet_version_uq (wallet_id, wallet_version)`, mais a trigger de cadeia (`WP003`), que exige `balance_before` igual ao `balance_after` anterior |
+| Aritmética do lançamento | `ledger_arithmetic_ck` |
+| Moeda e wallet do lançamento | FKs compostas `(wallet_id, currency)` → wallets e `(transaction_id, wallet_id)` → transações |
+| Reversão única | índice único parcial `wager_tx_single_reversal_uq` |
+| Ledger imutável | triggers de UPDATE, DELETE e TRUNCATE (`WP001`); transações também não são apagadas |
+| Estados terminais e campos de negócio imutáveis | trigger de UPDATE em `wager_transactions` (`WP002`), que também só aceita as transições da máquina de estados |
+| Saldo ↔ ledger | constraint triggers adiadas para o commit (`WP004`): versão e saldo da wallet batem com o último lançamento |
+| Ledger ↔ transação | constraint triggers adiadas (`WP005`): lançamento só de transação `PROCESSED` que move saldo, com mesmo valor, moeda e direção coerente; e transação `PROCESSED` que move saldo sempre tem lançamento |
+| Coerência da transação | `CHECK`s de tipo, status, `OPENING` só no provider `system`, referência exigida ou proibida por tipo, `failure_code` por status (com a taxonomia da D11), saldo observado e agenda de referência |
+
+- **Constraints adiadas:** são checadas no commit, então a ordem das escritas dentro da transação não importa. O custo é uma busca por índice por linha alterada.
+- **Um bug real que os testes pegaram:** o primeiro `CHECK` de `failure_code` aceitava `REJECTED` sem código, porque `NULL in (...)` resulta em `NULL` e um `CHECK` que avalia `NULL` passa. A constraint agora testa `is not null` explicitamente.
+- **Privilégio mínimo:** a migration cria o role `wagering_runtime` (sem login), com `SELECT/INSERT` no ledger e sem `UPDATE`, `DELETE` ou `TRUNCATE`. As migrations rodam com o dono do banco. O compose ainda conecta a aplicação como dono; o usuário de login restrito ainda não existe.
+
+### D14. Mapeamento: modelos de persistência e comandos explícitos
+
+- **Schemas:** um `defineEntity` por tabela ([schema.ts](src/infrastructure/persistence/schema.ts)), sem classes nem decorators. Dinheiro é `decimal('string')`. Os mappers convertem registro ↔ domínio e sempre reconstroem por `rehydrate`; o dinheiro volta por `Money.from`, então um valor fora do formato quebra de forma visível.
+- **Comandos explícitos:** os repositórios usam `insert`, `nativeUpdate` (com a versão esperada na guarda do saldo) e `findOne` com `LockMode.PESSIMISTIC_WRITE`, executados na hora, dentro de `em.transactional()`. O flush implícito do Unit of Work não é usado: a ordem das escritas é a do código, e cada constraint violada aparece na operação que a causou.
+- **Identity map desligado nas leituras:** um `findOne` nunca devolve um registro já alterado por um `nativeUpdate` da mesma transação.
+
+### D15. UnitOfWork e isolamento
+
+- **Uma unidade de trabalho = uma transação** com um fork novo do `EntityManager`. Os repositórios entregues à unidade compartilham esse fork, então tudo é confirmado junto ou nada é. A aplicação só conhece a porta `UnitOfWork`.
+- **Escrita:** `READ COMMITTED` com `SET LOCAL lock_timeout` (2 s) e `statement_timeout` (5 s) em cada transação. Um teste prova a premissa central: quem espera o `FOR UPDATE` da wallet enxerga o commit de quem o segurava.
+- **Leitura:** `readOnly()` usa `REPEATABLE READ` somente leitura, um snapshot coerente para consultas e reconciliação, e recusa escritas.
+
+### D16. Tradução de erros do banco
+
+O `UnitOfWork` traduz o erro do driver para um erro de aplicação. Erros de domínio passam intactos.
+
+| SQLSTATE / origem | Erro de aplicação | Leitura |
+|---|---|---|
+| `23505` em `wallets_player_currency_uq`, `wager_tx_idempotency_uq`, `wager_tx_external_uq` | `UniquenessViolationError` (com o assunto) | regra de negócio (409 na API) |
+| `23505` em `wager_tx_single_reversal_uq` ou `ledger_wallet_version_uq`, `40001`, `40P01` | `ConcurrencyConflictError` | repetir a unidade de trabalho |
+| `55P03` | `TransientInfrastructureError(LOCK_TIMEOUT)` | repetir depois |
+| `57014` | `TransientInfrastructureError(STATEMENT_TIMEOUT)` | repetir depois |
+| `08xxx`, `57P01-03`, `53300`, erro de rede, pool sem conexão | `TransientInfrastructureError(CONNECTION)` | repetir depois |
+| `WP001-005`, `23xxx`, `P0001`, `42501`, `25006` | `PersistenceInvariantError` | bug: não repetir, alertar |
 
 ## Interpretações adotadas
 

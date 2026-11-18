@@ -4,7 +4,7 @@ import { Migration } from '@mikro-orm/migrations';
 import { MikroORM } from '@mikro-orm/postgresql';
 import { createLogger } from '../../../src/infrastructure/observability/logger';
 import { buildOrmOptions } from '../../../src/infrastructure/persistence/mikro-orm.config';
-import { createTestDatabase, type TestDatabase } from '../../support/database';
+import { createTestDatabase, type TestDatabase, testDatabaseConfig } from '../../support/database';
 
 /** Migration descartável, só para provar o mecanismo (lista explícita, up/down) sob o Bun. */
 class CreateProbeTable extends Migration {
@@ -25,11 +25,9 @@ let orm: MikroORM;
 beforeAll(async () => {
   database = await createTestDatabase('postgres');
   orm = await MikroORM.init(
-    buildOrmOptions(
-      { url: database.url, poolMax: 5, connectTimeoutMs: 2000 },
-      createLogger({ level: 'silent' }),
-      { migrationsList: [{ name: PROBE_MIGRATION, class: CreateProbeTable }] },
-    ),
+    buildOrmOptions(testDatabaseConfig(database.url, { poolMax: 5 }), createLogger({ level: 'silent' }), {
+      migrationsList: [{ name: PROBE_MIGRATION, class: CreateProbeTable }],
+    }),
   );
 });
 
