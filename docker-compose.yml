@@ -1,0 +1,92 @@
+name: wagering
+
+# Mesma imagem para a aplicação e para os jobs one-shot (migrations e criação das filas).
+x-app: &app
+  image: wagering-processor:local
+  build:
+    context: .
+  environment: &app-environment
+    NODE_ENV: production
+    LOG_LEVEL: info
+    DATABASE_URL: postgres://wagering:wagering@postgres:5432/wagering
+    AWS_REGION: us-east-1
+    AWS_ACCESS_KEY_ID: test
+    AWS_SECRET_ACCESS_KEY: test
+    SQS_ENDPOINT: http://sqs:4566
+
+services:
+  postgres:
+    image: postgres:18.4
+    environment:
+      POSTGRES_USER: wagering
+      POSTGRES_PASSWORD: wagering
+      POSTGRES_DB: wagering
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-55432}:5432"
+    volumes:
+      # a partir do PostgreSQL 18 a imagem guarda os dados em /var/lib/postgresql/<versão>
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wagering -d wagering"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # MiniStack: emulador SQS livre (a LocalStack atual exige LOCALSTACK_AUTH_TOKEN)
+  sqs:
+    image: ministackorg/ministack:1.5.41
+    ports:
+      - "127.0.0.1:${SQS_HOST_PORT:-4566}:4566"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:4566/_ministack/health')"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  sqs-init:
+    <<: *app
+    command: ["bun", "src/infrastructure/sqs/setup-queues.ts"]
+    depends_on:
+      sqs:
+        condition: service_healthy
+    restart: "no"
+
+  migrate:
+    <<: *app
+    command: ["bun", "src/infrastructure/persistence/migrate.ts", "up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    <<: *app
+    environment:
+      <<: *app-environment
+      PORT: "3000"
+    ports:
+      - "127.0.0.1:${APP_HOST_PORT:-3000}:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      sqs-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - bun
+        - -e
+        - "fetch('http://127.0.0.1:3000/health/ready').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
