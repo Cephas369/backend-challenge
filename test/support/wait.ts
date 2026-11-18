@@ -27,3 +27,12 @@ export async function waitFor<T>(
   }
   throw new Error(`tempo esgotado esperando: ${options.description}`, { cause: lastError });
 }
+
+/** Promessa liberada de fora: coordena operações concorrentes sem `sleep`. */
+export function latch(): { promise: Promise<void>; release: () => void } {
+  let release = (): void => {};
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}

@@ -5,6 +5,7 @@ import type { AppConfig } from './infrastructure/config/config';
 import type { AppLogger } from './infrastructure/observability/logger';
 import { NestPinoLogger } from './infrastructure/observability/nest-logger';
 import { correlationIdMiddleware } from './interfaces/http/correlation-id.middleware';
+import { ProblemDetailsFilter } from './interfaces/http/problem-details';
 
 /** Monta a aplicação; usado pelo `main.ts` e pelos testes que sobem o app em processo. */
 export async function createApp(config: AppConfig, logger: AppLogger): Promise<NestExpressApplication> {
@@ -14,6 +15,7 @@ export async function createApp(config: AppConfig, logger: AppLogger): Promise<N
   });
   app.disable('x-powered-by');
   app.use(correlationIdMiddleware);
+  app.useGlobalFilters(new ProblemDetailsFilter(logger.child({ component: 'http' })));
   return app;
 }
 

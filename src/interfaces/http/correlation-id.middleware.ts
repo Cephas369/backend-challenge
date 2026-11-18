@@ -1,5 +1,5 @@
 import type { NextFunction, Request, Response } from 'express';
-import { runWithLogContext } from '../../infrastructure/observability/log-context';
+import { currentLogContext, runWithLogContext } from '../../infrastructure/observability/log-context';
 
 export const CORRELATION_ID_HEADER = 'x-correlation-id';
 
@@ -12,4 +12,9 @@ export function correlationIdMiddleware(request: Request, response: Response, ne
     incoming !== undefined && SAFE_CORRELATION_ID.test(incoming) ? incoming : Bun.randomUUIDv7();
   response.setHeader(CORRELATION_ID_HEADER, correlationId);
   runWithLogContext({ correlationId }, next);
+}
+
+/** correlationId da requisição em curso (definido pelo middleware). */
+export function currentCorrelationId(): string {
+  return currentLogContext()?.correlationId ?? Bun.randomUUIDv7();
 }

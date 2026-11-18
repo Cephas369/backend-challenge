@@ -1,5 +1,6 @@
 import type { InboxMessage } from '../../domain/messaging/inbox-message';
 import type { OutboxMessage } from '../../domain/messaging/outbox-message';
+import type { Money } from '../../domain/money/money';
 import type { WagerTransaction } from '../../domain/wagering/wager-transaction';
 import type { Wallet } from '../../domain/wallet/wallet';
 import type { WalletLedgerEntry } from '../../domain/wallet/wallet-ledger-entry';
@@ -22,10 +23,22 @@ export interface LedgerPage {
   readonly limit: number;
 }
 
+/** Agregados do ledger de uma wallet, calculados no banco, para a reconciliação. */
+export interface LedgerTotals {
+  readonly credits: Money;
+  readonly debits: Money;
+  readonly entries: number;
+  readonly latestVersion: number | undefined;
+  readonly latestBalance: Money | undefined;
+  /** Lançamentos cujo saldo inicial não continua o anterior (o schema impede; aqui é conferido de novo). */
+  readonly chainBreaks: number;
+}
+
 export interface LedgerRepository {
   append(entry: WalletLedgerEntry): Promise<void>;
   /** Lançamentos em ordem decrescente de versão (mais recentes primeiro). */
   page(walletId: string, page: LedgerPage): Promise<WalletLedgerEntry[]>;
+  totals(walletId: string, currency: string): Promise<LedgerTotals>;
 }
 
 export interface WagerTransactionRepository {

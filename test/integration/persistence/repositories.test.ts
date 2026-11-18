@@ -20,6 +20,7 @@ import { buildOrmOptions } from '../../../src/infrastructure/persistence/mikro-o
 import { MikroOrmUnitOfWork } from '../../../src/infrastructure/persistence/mikro-orm-unit-of-work';
 import { createMigratedDatabase, type MigratedDatabase, testDatabaseConfig } from '../../support/database';
 import { brl, persistOpenedWallet, settleAndPersist, uuid, wagerFor } from '../../support/persistence';
+import { latch } from '../../support/wait';
 
 let db: MigratedDatabase;
 
@@ -30,15 +31,6 @@ beforeAll(async () => {
 afterAll(async () => {
   await db?.close();
 });
-
-/** Promessa controlada de fora: coordena duas transações concorrentes sem `sleep`. */
-function latch(): { promise: Promise<void>; release: () => void } {
-  let release = (): void => {};
-  const promise = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  return { promise, release };
-}
 
 describe('ida e volta pelo banco', () => {
   test('wallet aberta, OPENING, crédito de abertura e evento na outbox', async () => {

@@ -5,6 +5,7 @@ import type {
   InboxRepository,
   LedgerPage,
   LedgerRepository,
+  LedgerTotals,
   OutboxRepository,
   Repositories,
   WagerTransactionRepository,
@@ -12,6 +13,7 @@ import type {
 } from '../../application/ports/persistence';
 import type { InboxMessage } from '../../domain/messaging/inbox-message';
 import type { OutboxMessage } from '../../domain/messaging/outbox-message';
+import { Money } from '../../domain/money/money';
 import type { WagerTransaction } from '../../domain/wagering/wager-transaction';
 import { WagerTransactionKind } from '../../domain/wagering/wager-transaction-kind';
 import { WagerTransactionStatus } from '../../domain/wagering/wager-transaction-status';
@@ -91,6 +93,41 @@ class MikroOrmLedgerRepository implements LedgerRepository {
       { ...FRESH, orderBy: { walletVersion: 'desc' }, limit: page.limit },
     );
     return records.map((record) => ledgerEntryMapper.toDomain(record));
+  }
+
+  async totals(walletId: string, currency: string): Promise<LedgerTotals> {
+    // somas separadas, ambas não negativas; numeric(38,2) evita estouro de precisão na soma
+    const [sums] = await this.em.execute<{ credits: string; debits: string; entries: number }[]>(
+      `select coalesce(sum(amount) filter (where direction = 'CREDIT'), 0)::numeric(38, 2)::text as credits,
+              coalesce(sum(amount) filter (where direction = 'DEBIT'), 0)::numeric(38, 2)::text as debits,
+              count(*)::int as entries
+         from wallet_ledger_entries where wallet_id = ?`,
+      [walletId],
+    );
+    const [latest] = await this.em.execute<{ wallet_version: number; balance_after: string }[]>(
+      `select wallet_version, balance_after::text as balance_after from wallet_ledger_entries
+        where wallet_id = ? order by wallet_version desc limit 1`,
+      [walletId],
+    );
+    const [chain] = await this.em.execute<{ breaks: number }[]>(
+      `select count(*)::int as breaks
+         from wallet_ledger_entries entry
+         left join wallet_ledger_entries previous
+           on previous.wallet_id = entry.wallet_id and previous.wallet_version = entry.wallet_version - 1
+        where entry.wallet_id = ?
+          and ((previous.id is null and not (entry.balance_before = 0 and entry.wallet_version in (1, 2)))
+               or (previous.id is not null and previous.balance_after <> entry.balance_before))`,
+      [walletId],
+    );
+    return {
+      credits: Money.from({ amount: sums?.credits ?? '0.00', currency }),
+      debits: Money.from({ amount: sums?.debits ?? '0.00', currency }),
+      entries: sums?.entries ?? 0,
+      latestVersion: latest?.wallet_version,
+      latestBalance:
+        latest === undefined ? undefined : Money.from({ amount: latest.balance_after, currency }),
+      chainBreaks: chain?.breaks ?? 0,
+    };
   }
 }
 

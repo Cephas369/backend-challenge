@@ -5,6 +5,8 @@ import type { AppLogger } from './infrastructure/observability/logger';
 import { PersistenceModule } from './infrastructure/persistence/persistence.module';
 import { SqsModule } from './infrastructure/sqs/sqs.module';
 import { HealthModule } from './interfaces/http/health/health.module';
+import { HttpApiModule } from './interfaces/http/http-api.module';
+import { UseCasesModule } from './use-cases.module';
 
 @Module({})
 export class AppModule {
@@ -15,7 +17,9 @@ export class AppModule {
         CoreModule.forRoot(config, logger),
         PersistenceModule.forRoot(),
         SqsModule.forRoot(),
+        UseCasesModule,
         HealthModule,
+        HttpApiModule,
       ],
     };
   }

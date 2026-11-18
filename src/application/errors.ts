@@ -64,3 +64,56 @@ export class PersistenceInvariantError extends ApplicationError {
     super(message, options);
   }
 }
+
+// erros dos use cases
+
+export class WalletNotFoundError extends ApplicationError {
+  override readonly code = 'WALLET_NOT_FOUND';
+
+  constructor(readonly walletId: string) {
+    super(`wallet ${walletId} não existe`);
+  }
+}
+
+export class WalletAlreadyExistsError extends ApplicationError {
+  override readonly code = 'WALLET_ALREADY_EXISTS';
+
+  constructor(
+    readonly playerId: string,
+    readonly currency: string,
+    options?: ErrorOptions,
+  ) {
+    super(`o player ${playerId} já tem wallet em ${currency}`, options);
+  }
+}
+
+export class TransactionNotFoundError extends ApplicationError {
+  override readonly code = 'TRANSACTION_NOT_FOUND';
+}
+
+/** Mesma Idempotency-Key com payload diferente: conflito, não replay. */
+export class IdempotencyConflictError extends ApplicationError {
+  override readonly code = 'IDEMPOTENCY_KEY_REUSED';
+
+  constructor(readonly existingTransactionId: string) {
+    super('a Idempotency-Key já foi usada com outro payload');
+  }
+}
+
+/** O mesmo (providerId, externalTransactionId) já existe sob outra Idempotency-Key. */
+export class ExternalTransactionConflictError extends ApplicationError {
+  override readonly code = 'EXTERNAL_ID_CONFLICT';
+
+  constructor(readonly existingTransactionId: string) {
+    super('o externalTransactionId já foi usado com outra Idempotency-Key');
+  }
+}
+
+/** Mesmo messageId da fila com conteúdo diferente: bug no produtor, não dá para processar. */
+export class InboxPayloadMismatchError extends ApplicationError {
+  override readonly code = 'MESSAGE_ID_REUSED';
+
+  constructor(readonly messageId: string) {
+    super(`a mensagem ${messageId} já foi recebida com outro conteúdo`);
+  }
+}

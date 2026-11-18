@@ -2,16 +2,17 @@
 
 Este documento registra as decisões técnicas do Distributed Wagering Processor à medida que são tomadas: o contexto, a escolha e o que ela implica.
 
-**Estado atual:** o domínio grava e lê do PostgreSQL pelas portas da aplicação, e o schema impõe as invariantes por conta própria. A API e os use cases ainda não existem.
+**Estado atual:** a API HTTP da seção 9 está completa sobre o domínio e a persistência, e os cenários de concorrência 1 a 3 da seção 13 passam com paralelismo real. Os eventos já vão para a outbox, mas a publicação, o consumer SQS e o worker de referências pendentes ainda não existem.
 
 ## Estrutura
 
 ```
 src/
   domain/          TypeScript puro: money, wallet, wagering, events, messaging, shared
-  application/     portas (repositórios, UnitOfWork) e erros de aplicação
+  application/     use cases (wallets, wagering), portas (persistência, relógio, ids) e erros de aplicação
   infrastructure/  config, observabilidade, persistência (schema, mappers, repositórios, migrations), SQS
-  interfaces/      HTTP (health, correlation id)
+  interfaces/      contratos de entrada (zod), HTTP (controllers, Problem Details, health)
+  use-cases.module.ts  raiz de composição: monta os use cases (classes sem Nest) com as portas concretas
 test/
   unit/            sem dependências externas
   integration/     PostgreSQL e MiniStack reais
@@ -205,6 +206,48 @@ O `UnitOfWork` traduz o erro do driver para um erro de aplicação. Erros de dom
 | `57014` | `TransientInfrastructureError(STATEMENT_TIMEOUT)` | repetir depois |
 | `08xxx`, `57P01-03`, `53300`, erro de rede, pool sem conexão | `TransientInfrastructureError(CONNECTION)` | repetir depois |
 | `WP001-005`, `23xxx`, `P0001`, `42501`, `25006` | `PersistenceInvariantError` | bug: não repetir, alertar |
+
+### D17. Fluxo de submissão (`SubmitWagerTransaction`)
+
+O HTTP e o SQS usam o mesmo use case ([submit-wager-transaction.ts](src/application/wagering/submit-wager-transaction.ts)):
+
+1. **Contrato:** valida antes de qualquer I/O e calcula o `payloadHash` do pedido.
+2. **Pré-checagem sem lock**, num snapshot somente leitura: se a key já existe, responde replay (hash igual) ou 409 (hash diferente). É só otimização: reenvios não disputam o lock da wallet.
+3. **Na transação SQL:**
+   - inbox, quando a origem é o SQS: `tryInsert` e, se for duplicata, devolve o resultado já gravado;
+   - `lockById` da wallet: 404 se não existir;
+   - re-checagem da key sob o lock (esta é a que vale);
+   - o mesmo `externalTransactionId` com outra key dá 409;
+   - resolução da referência por `(providerId, referenceExternalTransactionId)`, com "já revertida";
+   - `WagerSettlement`;
+   - gravação de transação, lançamento e saldo (com a versão esperada) e eventos na outbox.
+4. **Corridas raras:**
+   - a mesma key em wallets diferentes cai na unicidade do banco; a resposta é decidida relendo o registro (replay ou 409);
+   - `ConcurrencyConflictError` repete a unidade de trabalho até 3 vezes.
+5. **Falha transitória** (lock timeout, banco fora) não deixa rastro: um teste mostra que o reenvio com a mesma key é o primeiro processamento de fato.
+
+### D18. Contrato HTTP
+
+Um único mapeamento ([problem-details.ts](src/interfaces/http/problem-details.ts)) vale para todos os endpoints. Erros saem em Problem Details (RFC 9457) com `code` estável, `retryable` e `correlationId`.
+
+| Situação | HTTP | Corpo |
+|---|---|---|
+| Transação processada | 201 | resultado: `transactionId`, `status`, `balance`, `idempotentReplay` |
+| Aguardando referência | 202 | resultado |
+| Rejeitada por regra de negócio | 422 | resultado com `failureCode` |
+| Payload inválido | 400 | `VALIDATION_FAILED`, `INVALID_MONEY`, `KIND_NOT_ALLOWED`, `REFERENCE_REQUIRED`, `IDEMPOTENCY_KEY_REQUIRED`, `MALFORMED_REQUEST`… |
+| Não encontrado | 404 | `WALLET_NOT_FOUND`, `TRANSACTION_NOT_FOUND`, `ROUTE_NOT_FOUND` |
+| Conflito | 409 | `IDEMPOTENCY_KEY_REUSED`, `EXTERNAL_ID_CONFLICT`, `WALLET_ALREADY_EXISTS` |
+| Falha transitória | 503 + `Retry-After: 1` | `LOCK_TIMEOUT`, `DATABASE_UNAVAILABLE`, `CONCURRENCY_CONFLICT` |
+| Erro interno | 500 | `INTERNAL_ERROR`, sem a mensagem original |
+
+- **Replay:** devolve o mesmo status e o mesmo corpo, com `idempotentReplay: true`, mais o header `Idempotent-Replayed: true`. O saldo devolvido é o observado na decisão, não o atual.
+- **Contratos:** objetos estritos (campo desconhecido é recusado), ids de wallet e player em UUID, identificadores do provedor sem espaços nas pontas e `Idempotency-Key` em ASCII visível com até 255 caracteres.
+- **Ledger:** paginado do mais recente ao mais antigo, com cursor opaco (base64url da versão de onde continuar) e `limit` de 1 a 100 (padrão 50). O cursor é estável porque o ledger é imutável.
+
+### D19. Reconciliação
+
+`POST /wallets/:id/reconciliation` lê num snapshot `REPEATABLE READ` somente leitura e compara o saldo materializado com créditos menos débitos, somados no banco. Também confere a versão contra o último lançamento e a cadeia `balance_before`/`balance_after`. Uma divergência é logada como erro, devolvida com `consistent: false`, `difference` e `issues`, e nunca é corrigida. O teste adultera o saldo com os triggers desligados (só um superusuário consegue) e verifica a detecção.
 
 ## Interpretações adotadas
 
