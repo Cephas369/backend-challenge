@@ -10,49 +10,62 @@ const fifoQueueName = z
  */
 export const APP_ROLES = ['api', 'consumer', 'outbox', 'pending-ref'] as const;
 
-const environmentSchema = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  PORT: z.coerce.number().int().min(0).max(65_535).default(3000),
-  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
-  DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
-  DATABASE_POOL_MAX: z.coerce.number().int().positive().default(10),
-  DATABASE_CONNECT_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
-  DATABASE_LOCK_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
-  DATABASE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
-  AWS_REGION: z.string().min(1).default('us-east-1'),
-  SQS_ENDPOINT: z.url().optional(),
-  SQS_WAGER_QUEUE: fifoQueueName.default('wager-transactions.fifo'),
-  SQS_WAGER_DLQ: fifoQueueName.default('wager-transactions-dlq.fifo'),
-  SQS_EVENTS_QUEUE: fifoQueueName.default('wagering-events.fifo'),
-  SQS_MAX_RECEIVE_COUNT: z.coerce.number().int().min(1).max(1000).default(5),
-  SQS_VISIBILITY_TIMEOUT_SECONDS: z.coerce.number().int().min(1).max(43_200).default(30),
-  HEALTH_CHECK_TIMEOUT_MS: z.coerce.number().int().positive().default(1000),
-  APP_ROLES: z
-    .string()
-    .default(APP_ROLES.join(','))
-    .transform((value) => value.split(',').map((role) => role.trim()))
-    .pipe(z.array(z.enum(APP_ROLES)).min(1)),
-  CONSUMER_NAME: z.string().min(1).default('wagering-processor'),
-  SQS_WAIT_TIME_SECONDS: z.coerce.number().int().min(0).max(20).default(20),
-  SQS_RECEIVE_BATCH_SIZE: z.coerce.number().int().min(1).max(10).default(10),
-  SQS_RETRY_BASE_DELAY_SECONDS: z.coerce.number().int().min(1).max(900).default(2),
-  OUTBOX_BATCH_SIZE: z.coerce.number().int().min(1).max(10).default(10),
-  OUTBOX_IDLE_DELAY_MS: z.coerce.number().int().min(10).default(500),
-  OUTBOX_SEND_TIMEOUT_MS: z.coerce.number().int().min(100).default(3000),
-  PENDING_REFERENCE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
-  PENDING_REFERENCE_IDLE_DELAY_MS: z.coerce.number().int().min(10).default(1000),
-  PENDING_REFERENCE_LEASE_MS: z.coerce.number().int().min(100).default(30_000),
-  REFERENCE_RETRY_INITIAL_DELAY_MS: z.coerce.number().int().min(1).default(1000),
-  REFERENCE_RETRY_MAX_DELAY_MS: z.coerce.number().int().min(1).default(60_000),
-  REFERENCE_TTL_MS: z.coerce
-    .number()
-    .int()
-    .min(1)
-    .default(15 * 60_000),
-  SHUTDOWN_GRACE_MS: z.coerce.number().int().min(0).default(20_000),
-});
+/**
+ * Falhas provocadas de propósito pelos testes de processo (só com NODE_ENV=test):
+ * `crash-after-commit-before-ack` derruba o processo depois do commit e antes do ack da primeira mensagem.
+ */
+export const FAULT_INJECTIONS = ['none', 'crash-after-commit-before-ack'] as const;
+
+const environmentSchema = z
+  .object({
+    NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+    PORT: z.coerce.number().int().min(0).max(65_535).default(3000),
+    LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
+    DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
+    DATABASE_POOL_MAX: z.coerce.number().int().positive().default(10),
+    DATABASE_CONNECT_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
+    DATABASE_LOCK_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
+    DATABASE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+    AWS_REGION: z.string().min(1).default('us-east-1'),
+    SQS_ENDPOINT: z.url().optional(),
+    SQS_WAGER_QUEUE: fifoQueueName.default('wager-transactions.fifo'),
+    SQS_WAGER_DLQ: fifoQueueName.default('wager-transactions-dlq.fifo'),
+    SQS_EVENTS_QUEUE: fifoQueueName.default('wagering-events.fifo'),
+    SQS_MAX_RECEIVE_COUNT: z.coerce.number().int().min(1).max(1000).default(5),
+    SQS_VISIBILITY_TIMEOUT_SECONDS: z.coerce.number().int().min(1).max(43_200).default(30),
+    HEALTH_CHECK_TIMEOUT_MS: z.coerce.number().int().positive().default(1000),
+    APP_ROLES: z
+      .string()
+      .default(APP_ROLES.join(','))
+      .transform((value) => value.split(',').map((role) => role.trim()))
+      .pipe(z.array(z.enum(APP_ROLES)).min(1)),
+    CONSUMER_NAME: z.string().min(1).default('wagering-processor'),
+    SQS_WAIT_TIME_SECONDS: z.coerce.number().int().min(0).max(20).default(20),
+    SQS_RECEIVE_BATCH_SIZE: z.coerce.number().int().min(1).max(10).default(10),
+    SQS_RETRY_BASE_DELAY_SECONDS: z.coerce.number().int().min(1).max(900).default(2),
+    OUTBOX_BATCH_SIZE: z.coerce.number().int().min(1).max(10).default(10),
+    OUTBOX_IDLE_DELAY_MS: z.coerce.number().int().min(10).default(500),
+    OUTBOX_SEND_TIMEOUT_MS: z.coerce.number().int().min(100).default(3000),
+    PENDING_REFERENCE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
+    PENDING_REFERENCE_IDLE_DELAY_MS: z.coerce.number().int().min(10).default(1000),
+    PENDING_REFERENCE_LEASE_MS: z.coerce.number().int().min(100).default(30_000),
+    REFERENCE_RETRY_INITIAL_DELAY_MS: z.coerce.number().int().min(1).default(1000),
+    REFERENCE_RETRY_MAX_DELAY_MS: z.coerce.number().int().min(1).default(60_000),
+    REFERENCE_TTL_MS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .default(15 * 60_000),
+    SHUTDOWN_GRACE_MS: z.coerce.number().int().min(0).default(20_000),
+    FAULT_INJECTION: z.enum(FAULT_INJECTIONS).default('none'),
+  })
+  .refine((env) => env.FAULT_INJECTION === 'none' || env.NODE_ENV === 'test', {
+    message: 'FAULT_INJECTION só é aceito com NODE_ENV=test',
+    path: ['FAULT_INJECTION'],
+  });
 
 export type LogLevel = z.infer<typeof environmentSchema>['LOG_LEVEL'];
+export type FaultInjection = (typeof FAULT_INJECTIONS)[number];
 export type AppRole = (typeof APP_ROLES)[number];
 
 export interface MessagingConfig {
@@ -106,6 +119,7 @@ export interface AppConfig {
   readonly messaging: MessagingConfig;
   readonly referenceRetry: ReferenceRetryConfig;
   readonly shutdownGraceMs: number;
+  readonly faultInjection: FaultInjection;
 }
 
 export class InvalidConfigError extends Error {
@@ -162,5 +176,6 @@ export function loadConfig(environment: Record<string, string | undefined>): App
       ttlMs: env.REFERENCE_TTL_MS,
     },
     shutdownGraceMs: env.SHUTDOWN_GRACE_MS,
+    faultInjection: env.FAULT_INJECTION,
   };
 }

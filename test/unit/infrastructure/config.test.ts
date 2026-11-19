@@ -43,4 +43,21 @@ describe('loadConfig', () => {
   test('rejeita fila que não é FIFO', () => {
     expect(() => loadConfig({ ...required, SQS_WAGER_QUEUE: 'wager-transactions' })).toThrow(/FIFO/);
   });
+
+  test('APP_ROLES escolhe os papéis da instância; todos por padrão; papel desconhecido é recusado', () => {
+    expect([...loadConfig(required).roles]).toEqual(['api', 'consumer', 'outbox', 'pending-ref']);
+    expect([...loadConfig({ ...required, APP_ROLES: 'consumer, outbox' }).roles]).toEqual([
+      'consumer',
+      'outbox',
+    ]);
+    expect(() => loadConfig({ ...required, APP_ROLES: 'api,cron' })).toThrow(InvalidConfigError);
+  });
+
+  test('injeção de falha só é aceita com NODE_ENV=test', () => {
+    const crash = { ...required, FAULT_INJECTION: 'crash-after-commit-before-ack' };
+
+    expect(() => loadConfig({ ...crash, NODE_ENV: 'production' })).toThrow(/FAULT_INJECTION/);
+    expect(loadConfig({ ...crash, NODE_ENV: 'test' }).faultInjection).toBe('crash-after-commit-before-ack');
+    expect(loadConfig(required).faultInjection).toBe('none');
+  });
 });

@@ -114,6 +114,10 @@ export class MessagingModule implements OnApplicationBootstrap, BeforeApplicatio
                 maxReceiveCount: config.sqs.maxReceiveCount,
                 retryBaseDelaySeconds: config.messaging.retryBaseDelaySeconds,
                 shutdownGraceMs: config.shutdownGraceMs,
+                beforeAck:
+                  config.faultInjection === 'crash-after-commit-before-ack'
+                    ? () => crashOnPurpose(logger)
+                    : undefined,
               },
               logger.child({ component: 'wager-consumer' }),
             ),
@@ -160,4 +164,10 @@ export class MessagingModule implements OnApplicationBootstrap, BeforeApplicatio
   async beforeApplicationShutdown(): Promise<void> {
     await Promise.all([this.consumer.stop(), this.outboxWorker.stop(), this.pendingReferenceWorker.stop()]);
   }
+}
+
+/** Falha provocada pelos testes de processo: morre como num SIGKILL, depois do commit e antes do ack. */
+async function crashOnPurpose(logger: AppLogger): Promise<never> {
+  logger.warn('fault injection: process crashing after commit, before ack');
+  process.exit(137);
 }

@@ -63,15 +63,31 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # cria o usuário de login da aplicação, com os privilégios mínimos de wagering_runtime
+  db-roles:
+    image: postgres:18.4
+    command: ["psql", "--host=postgres", "--username=wagering", "--dbname=wagering", "--set=ON_ERROR_STOP=1", "--file=/sql/app-role.sql"]
+    environment:
+      PGPASSWORD: wagering
+    volumes:
+      - ./infra/postgres:/sql:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  # três réplicas iguais, todas com todos os papéis (API, consumer, outbox e referências pendentes)
   app:
     <<: *app
+    deploy:
+      replicas: 3
     environment:
       <<: *app-environment
       PORT: "3000"
-    ports:
-      - "127.0.0.1:${APP_HOST_PORT:-3000}:3000"
+      # a aplicação não conecta como dono: não consegue alterar nem apagar o ledger
+      DATABASE_URL: postgres://wagering_app:wagering_app@postgres:5432/wagering
     depends_on:
-      migrate:
+      db-roles:
         condition: service_completed_successfully
       sqs-init:
         condition: service_completed_successfully
@@ -87,6 +103,16 @@ services:
       start_period: 5s
     stop_grace_period: 30s
     restart: unless-stopped
+
+  nginx:
+    image: nginx:1.29-alpine
+    ports:
+      - "127.0.0.1:${APP_HOST_PORT:-3000}:80"
+    volumes:
+      - ./infra/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      app:
+        condition: service_healthy
 
 volumes:
   postgres-data:

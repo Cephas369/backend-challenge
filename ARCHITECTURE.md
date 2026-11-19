@@ -2,7 +2,7 @@
 
 Este documento registra as decisões técnicas do Distributed Wagering Processor à medida que são tomadas: o contexto, a escolha e o que ela implica.
 
-**Estado atual:** API HTTP, consumer SQS, publisher da outbox e worker de referências pendentes funcionam de ponta a ponta. Dos cenários da seção 13, passam os de concorrência 1, 2, 3, 6 e 7, mais os de inbox, redelivery, retry e DLQ. Faltam os cenários com múltiplos processos e falhas de processo (4, 5 e 8).
+**Estado atual:** os 8 cenários de concorrência da seção 13 passam com paralelismo real, inclusive com processos reais morrendo no meio do caminho. O compose sobe 3 réplicas atrás de um nginx, com a aplicação conectada por um usuário de privilégio mínimo. Faltam as métricas e a documentação final.
 
 ## Estrutura
 
@@ -181,7 +181,7 @@ A [migration inicial](src/infrastructure/persistence/migrations/Migration2026111
 
 - **Constraints adiadas:** são checadas no commit, então a ordem das escritas dentro da transação não importa. O custo é uma busca por índice por linha alterada.
 - **Um bug real que os testes pegaram:** o primeiro `CHECK` de `failure_code` aceitava `REJECTED` sem código, porque `NULL in (...)` resulta em `NULL` e um `CHECK` que avalia `NULL` passa. A constraint agora testa `is not null` explicitamente.
-- **Privilégio mínimo:** a migration cria o role `wagering_runtime` (sem login), com `SELECT/INSERT` no ledger e sem `UPDATE`, `DELETE` ou `TRUNCATE`. As migrations rodam com o dono do banco. O compose ainda conecta a aplicação como dono; o usuário de login restrito ainda não existe.
+- **Privilégio mínimo:** a migration cria o role `wagering_runtime` (sem login), com `SELECT/INSERT` no ledger e sem `UPDATE`, `DELETE` ou `TRUNCATE`. As migrations rodam com o dono do banco. No compose, a aplicação conecta como `wagering_app` (D24), que herda só esse role; tentar alterar o ledger com ele dá `permission denied` antes mesmo dos triggers.
 
 ### D14. Mapeamento: modelos de persistência e comandos explícitos
 
@@ -296,6 +296,16 @@ Um único mapeamento ([problem-details.ts](src/interfaces/http/problem-details.t
 
 - **`APP_ROLES`:** escolhe o que a instância roda (`api`, `consumer`, `outbox`, `pending-ref`). A mesma imagem serve qualquer combinação e os health checks ficam sempre no ar. Os testes de API sobem só com `api`; consumer e workers só sobem com filas próprias do teste.
 - **Shutdown:** o readiness passa a responder 503 (`shuttingDown: true`), consumer e workers param, e só depois o pool do banco e o cliente SQS fecham. Um teste de processo real confirma essa ordem e que o long polling de 20 s é cancelado (o desligamento leva menos de 5 s).
+
+### D24. Múltiplas instâncias e falhas de processo
+
+- **Compose:** 3 réplicas iguais do `app`, todas com todos os papéis, atrás de um nginx em `127.0.0.1:3000`. O nginx reresolve o DNS do Docker a cada 10 s e alterna entre as réplicas, e só tenta outra se a conexão falhar: um POST já enviado nunca é repetido por ele. Nenhuma garantia depende de afinidade ou de estado em memória: locks, idempotência, inbox e outbox estão no banco.
+- **Usuário do banco:** o job `db-roles` cria `wagering_app`, que herda `wagering_runtime`. As réplicas conectam com ele; as migrations, com o dono.
+- **Injeção de falha:** `FAULT_INJECTION=crash-after-commit-before-ack` faz o consumer sair com `process.exit(137)` (como num `SIGKILL`) depois do commit e antes do ack. A configuração só aceita isso com `NODE_ENV=test`.
+- **Testes com processos reais** ([multi-instance.test.ts](test/concurrency/multi-instance.test.ts)):
+  - **Cenário 4:** 3 instâncias recebem 120 apostas por HTTP, 40 delas também enviadas a outra instância ao mesmo tempo com a mesma key, mais 60 mensagens SQS, todas nas mesmas 4 wallets. Cada aposta é aplicada uma vez, todas as wallets reconciliam, e mais de uma instância consumiu da fila.
+  - **Cenário 5:** a instância morre com código 137 depois do commit. A transação está confirmada e a mensagem não foi removida. Outra instância recebe a redelivery, a inbox a reconhece (replay) e o efeito é único.
+  - **Cenário 8:** `SIGKILL` em todas as instâncias com requisições em voo, 3 instâncias novas e o cliente reenviando com a mesma key o que ficou sem resposta. A fila redistribui o que estava em voo, o worker resolve os REFUNDs que chegaram antes das apostas e tudo é aplicado uma única vez, com as wallets fechando exatamente no saldo esperado.
 
 ## Interpretações adotadas
 
