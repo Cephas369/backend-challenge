@@ -45,3 +45,12 @@ export const ledgerQueryContract = z.object({
   cursor: z.string().min(1).max(200).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
+
+/** Mensagem `WagerTransactionRequested` da fila `wager-transactions.fifo` (seção 10). */
+export const wagerTransactionRequestedMessage = z.strictObject({
+  messageId: opaqueId(255),
+  type: z.literal('WagerTransactionRequested'),
+  occurredAt: z.iso.datetime(),
+  data: z.strictObject({ ...wagerTransactionContract.shape, idempotencyKey: idempotencyKeyContract }),
+});
+export type WagerTransactionRequestedMessage = z.infer<typeof wagerTransactionRequestedMessage>;

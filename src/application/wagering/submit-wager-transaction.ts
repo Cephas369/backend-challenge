@@ -144,6 +144,10 @@ export class SubmitWagerTransaction {
       await ledger.append(outcome.entry);
       await wallets.saveBalance(wallet, expectedVersion);
     }
+    if (outcome.type === 'PROCESSED') {
+      // quem chegou antes e espera por esta transação não precisa aguardar o próximo backoff
+      await transactions.expediteWaitingFor(transaction.providerId, transaction.externalTransactionId, now);
+    }
     const events = settlementEvents(outcome, transaction, wallet, () => ({
       eventId: this.ids.next(),
       correlationId: command.correlationId,

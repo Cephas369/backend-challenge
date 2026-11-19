@@ -50,6 +50,18 @@ export interface WagerTransactionRepository {
   findByExternalId(providerId: string, externalTransactionId: string): Promise<WagerTransaction | undefined>;
   /** Existe REFUND ou ROLLBACK PROCESSED apontando para esta transação? */
   hasProcessedReversal(referenceTransactionId: string): Promise<boolean>;
+  /**
+   * Reivindica transações PENDING_REFERENCE vencidas sem esperar lock (`SKIP LOCKED`) e adia a
+   * próxima busca delas até `leaseUntil`; se quem reivindicou morrer, o prazo vence e outra instância pega.
+   */
+  claimDueReferenceChecks(now: Date, limit: number, leaseUntil: Date): Promise<PendingReferenceClaim[]>;
+  /** Antecipa a busca das transações que esperam por esta referência (ela acabou de ser processada). */
+  expediteWaitingFor(providerId: string, externalTransactionId: string, now: Date): Promise<number>;
+}
+
+export interface PendingReferenceClaim {
+  readonly transactionId: string;
+  readonly walletId: string;
 }
 
 export interface InboxRepository {
@@ -65,6 +77,15 @@ export interface InboxRepository {
 export interface OutboxRepository {
   append(messages: readonly OutboxMessage[]): Promise<void>;
   findById(id: string): Promise<OutboxMessage | undefined>;
+  /**
+   * Mensagens devidas, travadas até o fim da transação com `FOR UPDATE SKIP LOCKED`: publishers
+   * concorrentes pegam lotes disjuntos sem esperar uns pelos outros.
+   */
+  claimDue(now: Date, limit: number): Promise<OutboxMessage[]>;
+  /** Grava o resultado da tentativa (publicada, ou tentativas, próxima tentativa e último erro). */
+  save(message: OutboxMessage): Promise<void>;
+  /** Idade da mensagem pendente mais antiga, em ms (outbox lag); 0 se não há pendentes. */
+  oldestPendingAgeMs(now: Date): Promise<number>;
 }
 
 /** Repositórios ligados a uma mesma transação. */

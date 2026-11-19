@@ -68,20 +68,20 @@ export function wagerBody(wallet: WalletBody, overrides: Record<string, unknown>
   };
 }
 
-/** A aplicação inteira em processo, contra um banco migrado próprio da suíte. */
+/**
+ * A aplicação em processo, contra um banco migrado próprio da suíte. Só o papel "api" é ligado:
+ * consumer e workers não sobem aqui (têm testes próprios, com filas próprias).
+ */
 export async function startTestApi(
   label: string,
   environment: { lockTimeoutMs?: number } = {},
 ): Promise<TestApi> {
   const db = await createMigratedDatabase(label);
-  const base = buildTestConfig({ databaseUrl: db.database.url });
-  const config = {
-    ...base,
-    database: {
-      ...base.database,
-      ...(environment.lockTimeoutMs === undefined ? {} : { lockTimeoutMs: environment.lockTimeoutMs }),
-    },
-  };
+  const config = buildTestConfig({
+    databaseUrl: db.database.url,
+    ...(environment.lockTimeoutMs === undefined ? {} : { lockTimeoutMs: environment.lockTimeoutMs }),
+    roles: ['api'],
+  });
   const app: NestExpressApplication = await createApp(config, createLogger({ level: 'silent' }));
   await app.listen(0, '127.0.0.1');
   const baseUrl = `http://127.0.0.1:${listeningPort(app)}`;

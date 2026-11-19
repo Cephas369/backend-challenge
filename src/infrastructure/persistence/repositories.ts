@@ -7,6 +7,7 @@ import type {
   LedgerRepository,
   LedgerTotals,
   OutboxRepository,
+  PendingReferenceClaim,
   Repositories,
   WagerTransactionRepository,
   WalletRepository,
@@ -173,6 +174,38 @@ class MikroOrmWagerTransactionRepository implements WagerTransactionRepository {
     return count > 0;
   }
 
+  async claimDueReferenceChecks(
+    now: Date,
+    limit: number,
+    leaseUntil: Date,
+  ): Promise<PendingReferenceClaim[]> {
+    // só linhas de transação, sem esperar lock (SKIP LOCKED): nunca entra em fila atrás de uma wallet
+    const rows = await this.em.execute<{ id: string; wallet_id: string }[]>(
+      `update wager_transactions set next_reference_check_at = ?
+        where id in (
+          select id from wager_transactions
+           where status = 'PENDING_REFERENCE' and next_reference_check_at <= ?
+           order by next_reference_check_at
+           limit ?
+           for update skip locked)
+        returning id, wallet_id`,
+      [leaseUntil, now, limit],
+    );
+    return rows.map((row) => ({ transactionId: row.id, walletId: row.wallet_id }));
+  }
+
+  async expediteWaitingFor(providerId: string, externalTransactionId: string, now: Date): Promise<number> {
+    return this.em.nativeUpdate(
+      WagerTransactionSchema,
+      {
+        providerId,
+        referenceExternalTransactionId: externalTransactionId,
+        status: WagerTransactionStatus.PendingReference,
+      },
+      { nextReferenceCheckAt: now },
+    );
+  }
+
   private async findOne(where: {
     id?: string;
     providerId?: string;
@@ -238,6 +271,43 @@ class MikroOrmOutboxRepository implements OutboxRepository {
   async findById(id: string): Promise<OutboxMessage | undefined> {
     const record = await this.em.findOne(OutboxMessageSchema, { id }, FRESH);
     return record === null ? undefined : outboxMessageMapper.toDomain(record);
+  }
+
+  async claimDue(now: Date, limit: number): Promise<OutboxMessage[]> {
+    const records = await this.em.find(
+      OutboxMessageSchema,
+      { publishedAt: null, nextAttemptAt: { $lte: now } },
+      {
+        ...FRESH,
+        orderBy: { occurredAt: 'asc', id: 'asc' },
+        limit,
+        lockMode: LockMode.PESSIMISTIC_PARTIAL_WRITE,
+      },
+    );
+    return records.map((record) => outboxMessageMapper.toDomain(record));
+  }
+
+  async save(message: OutboxMessage): Promise<void> {
+    const updated = await this.em.nativeUpdate(
+      OutboxMessageSchema,
+      { id: message.id },
+      {
+        attempts: message.attempts,
+        nextAttemptAt: message.nextAttemptAt ?? null,
+        publishedAt: message.publishedAt ?? null,
+        lastError: message.lastError ?? null,
+      },
+    );
+    if (updated !== 1) {
+      throw new PersistenceInvariantError(undefined, `evento ${message.id} não está na outbox`);
+    }
+  }
+
+  async oldestPendingAgeMs(now: Date): Promise<number> {
+    const [row] = await this.em.execute<{ oldest: string | null }[]>(
+      'select min(occurred_at)::text as oldest from outbox_messages where published_at is null',
+    );
+    return row?.oldest == null ? 0 : Math.max(0, now.getTime() - new Date(row.oldest).getTime());
   }
 }
 

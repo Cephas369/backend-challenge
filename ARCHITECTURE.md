@@ -2,7 +2,7 @@
 
 Este documento registra as decisões técnicas do Distributed Wagering Processor à medida que são tomadas: o contexto, a escolha e o que ela implica.
 
-**Estado atual:** a API HTTP da seção 9 está completa sobre o domínio e a persistência, e os cenários de concorrência 1 a 3 da seção 13 passam com paralelismo real. Os eventos já vão para a outbox, mas a publicação, o consumer SQS e o worker de referências pendentes ainda não existem.
+**Estado atual:** API HTTP, consumer SQS, publisher da outbox e worker de referências pendentes funcionam de ponta a ponta. Dos cenários da seção 13, passam os de concorrência 1, 2, 3, 6 e 7, mais os de inbox, redelivery, retry e DLQ. Faltam os cenários com múltiplos processos e falhas de processo (4, 5 e 8).
 
 ## Estrutura
 
@@ -11,7 +11,8 @@ src/
   domain/          TypeScript puro: money, wallet, wagering, events, messaging, shared
   application/     use cases (wallets, wagering), portas (persistência, relógio, ids) e erros de aplicação
   infrastructure/  config, observabilidade, persistência (schema, mappers, repositórios, migrations), SQS
-  interfaces/      contratos de entrada (zod), HTTP (controllers, Problem Details, health)
+  interfaces/      contratos de entrada (zod), HTTP (controllers, Problem Details, health),
+                   messaging (consumer SQS, módulo dos workers), workers (laço de polling)
   use-cases.module.ts  raiz de composição: monta os use cases (classes sem Nest) com as portas concretas
 test/
   unit/            sem dependências externas
@@ -248,6 +249,53 @@ Um único mapeamento ([problem-details.ts](src/interfaces/http/problem-details.t
 ### D19. Reconciliação
 
 `POST /wallets/:id/reconciliation` lê num snapshot `REPEATABLE READ` somente leitura e compara o saldo materializado com créditos menos débitos, somados no banco. Também confere a versão contra o último lançamento e a cadeia `balance_before`/`balance_after`. Uma divergência é logada como erro, devolvida com `consistent: false`, `difference` e `issues`, e nunca é corrigida. O teste adultera o saldo com os triggers desligados (só um superusuário consegue) e verifica a detecção.
+
+### D20. Consumer SQS
+
+[wager-transaction-consumer.ts](src/interfaces/messaging/wager-transaction-consumer.ts) consome `wager-transactions.fifo` com long polling e chama o mesmo `SubmitWagerTransaction` da API.
+
+- **Inbox:** a dedup é pelo `messageId` do envelope (estável entre redeliveries e republicações), por `(consumerName, messageId)`, na mesma transação do efeito. O `consumerName` é o mesmo em todas as instâncias.
+- **Ack:** só acontece depois do commit. Se o processo morrer entre um e outro, a redelivery encontra a inbox e confirma sem efeito.
+- **Classificação dos desfechos:**
+
+  | Desfecho | Ação |
+  |---|---|
+  | Processada, rejeitada por regra de negócio, pendente ou replay | ack |
+  | JSON ou contrato inválido, conflito de idempotência, wallet inexistente, `messageId` reusado com outro conteúdo, invariante do banco | DLQ na hora |
+  | Lock timeout, banco fora, conflito de concorrência, erro inesperado | `ChangeMessageVisibility` com backoff (`base × 2^(tentativa−1)`) |
+  | Última tentativa (`maxReceiveCount`) | DLQ com `RETRIES_EXHAUSTED` e o último motivo |
+
+- **DLQ:** a cópia leva os atributos `dlq-reason`, `dlq-detail`, `source-message-id` e `receive-count`. Primeiro envia para a DLQ, depois apaga da origem, para nunca perder a mensagem. O redrive policy da fila continua como rede de segurança.
+- **Ordem:** grupos diferentes (wallets) são processados em paralelo, e o mesmo grupo em ordem. Se uma mensagem do grupo vai ser repetida, as seguintes do lote são devolvidas à fila para não passarem na frente.
+- **Banco fora:** o consumer pausa o recebimento por alguns segundos, para não gastar tentativas à toa.
+- **SIGTERM:** cancela o long polling, conclui o que está em andamento dentro do grace period e devolve a visibilidade do que não começou.
+
+### D21. Publisher da outbox
+
+[PublishOutboxBatch](src/application/messaging/publish-outbox.ts) faz, numa transação:
+1. `claimDue` com `FOR UPDATE SKIP LOCKED`, para que publishers concorrentes peguem lotes disjuntos sem esperar uns pelos outros;
+2. `SendMessageBatch` com timeout curto;
+3. marca cada mensagem como publicada ou chama `scheduleRetry`.
+
+- **Destino:** a fila `wagering-events.fifo`, com `MessageGroupId` = aggregateId e `MessageDeduplicationId` = eventId.
+- **Morte entre o envio e o commit:** nada foi confirmado, então a mensagem continua devida e outra instância a republica.
+- **Garantia ao consumidor:** a entrega é at-least-once e o consumidor deduplica por `eventId`. O teste faz isso com uma projeção que usa a própria inbox. A dedup da fila FIFO (janela de 5 minutos) é só otimização.
+- **SQS fora:** as tentativas aumentam com backoff e o último erro fica guardado. Nada é descartado, e a idade do pendente mais antigo (`oldestPendingAgeMs`) é o outbox lag.
+
+### D22. Worker de referências pendentes
+
+[ReprocessPendingReferences](src/application/wagering/reprocess-pending-references.ts) roda em duas etapas:
+1. **Reivindica** pendências vencidas com `UPDATE … WHERE id IN (… FOR UPDATE SKIP LOCKED) RETURNING`. Isso toca só as linhas de transação, nunca espera lock, e adia a próxima busca pelo tempo de reserva (30 s): se a instância morrer, outra pega quando o prazo vencer.
+2. **Reprocessa** cada uma na sua transação, com a mesma ordem de locks do fluxo principal (wallet primeiro). Relê o status sob o lock: se outra instância já decidiu, pula. Aplica as mesmas regras.
+
+- **Antecipação:** quando uma transação é processada, a busca das que esperam por ela é antecipada para agora (`expediteWaitingFor`), sem esperar o backoff.
+- **Erro permanente:** marca `FAILED` (`INVARIANT_VIOLATION` ou `PROCESSING_FAILED`) para auditoria, em vez de girar para sempre. Erro transitório fica para a próxima rodada.
+- **Continuação assíncrona:** os eventos levam o id da transação como `correlationId`, porque o pedido original já terminou.
+
+### D23. Papéis, shutdown e readiness
+
+- **`APP_ROLES`:** escolhe o que a instância roda (`api`, `consumer`, `outbox`, `pending-ref`). A mesma imagem serve qualquer combinação e os health checks ficam sempre no ar. Os testes de API sobem só com `api`; consumer e workers só sobem com filas próprias do teste.
+- **Shutdown:** o readiness passa a responder 503 (`shuttingDown: true`), consumer e workers param, e só depois o pool do banco e o cliente SQS fecham. Um teste de processo real confirma essa ordem e que o long polling de 20 s é cancelado (o desligamento leva menos de 5 s).
 
 ## Interpretações adotadas
 

@@ -6,6 +6,7 @@ import { PersistenceModule } from './infrastructure/persistence/persistence.modu
 import { SqsModule } from './infrastructure/sqs/sqs.module';
 import { HealthModule } from './interfaces/http/health/health.module';
 import { HttpApiModule } from './interfaces/http/http-api.module';
+import { MessagingModule } from './interfaces/messaging/messaging.module';
 import { UseCasesModule } from './use-cases.module';
 
 @Module({})
@@ -19,7 +20,9 @@ export class AppModule {
         SqsModule.forRoot(),
         UseCasesModule,
         HealthModule,
-        HttpApiModule,
+        MessagingModule.forRoot(),
+        // health fica no ar em todos os papéis; a API de negócio só no papel "api"
+        ...(config.roles.has('api') ? [HttpApiModule] : []),
       ],
     };
   }

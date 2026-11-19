@@ -7,8 +7,9 @@ import { CreateWallet } from './application/wallets/create-wallet';
 import { GetWallet, ListLedger, ReconcileWallet } from './application/wallets/wallet-queries';
 import { ReferenceRetryPolicy } from './domain/wagering/reference-retry-policy';
 import { WagerSettlement } from './domain/wagering/wager-settlement';
+import type { AppConfig } from './infrastructure/config/config';
 import { systemClock, uuidV7Generator } from './infrastructure/runtime';
-import { CLOCK, ID_GENERATOR, UNIT_OF_WORK } from './infrastructure/tokens';
+import { APP_CONFIG, CLOCK, ID_GENERATOR, UNIT_OF_WORK } from './infrastructure/tokens';
 
 /**
  * Raiz de composição dos use cases. Eles são classes simples (sem Nest): este módulo só
@@ -19,7 +20,12 @@ import { CLOCK, ID_GENERATOR, UNIT_OF_WORK } from './infrastructure/tokens';
   providers: [
     { provide: CLOCK, useValue: systemClock },
     { provide: ID_GENERATOR, useValue: uuidV7Generator },
-    { provide: WagerSettlement, useFactory: () => new WagerSettlement(new ReferenceRetryPolicy()) },
+    {
+      provide: WagerSettlement,
+      inject: [APP_CONFIG],
+      useFactory: (config: AppConfig) =>
+        new WagerSettlement(new ReferenceRetryPolicy({ ...config.referenceRetry, jitter: 0.2 })),
+    },
     {
       provide: CreateWallet,
       inject: [UNIT_OF_WORK, CLOCK, ID_GENERATOR],
