@@ -2,7 +2,7 @@
 
 Este documento registra as decisões técnicas do Distributed Wagering Processor à medida que são tomadas: o contexto, a escolha e o que ela implica.
 
-**Estado atual:** os 8 cenários de concorrência da seção 13 passam com paralelismo real, inclusive com processos reais morrendo no meio do caminho. O compose sobe 3 réplicas atrás de um nginx, com a aplicação conectada por um usuário de privilégio mínimo. Faltam as métricas e a documentação final.
+**Estado atual:** os 8 cenários de concorrência da seção 13 passam com paralelismo real, inclusive com processos reais morrendo no meio do caminho. O compose sobe 3 réplicas atrás de um nginx, com a aplicação conectada por um usuário de privilégio mínimo, e `/metrics` expõe as métricas da seção 12. Falta a documentação final.
 
 ## Estrutura
 
@@ -306,6 +306,26 @@ Um único mapeamento ([problem-details.ts](src/interfaces/http/problem-details.t
   - **Cenário 4:** 3 instâncias recebem 120 apostas por HTTP, 40 delas também enviadas a outra instância ao mesmo tempo com a mesma key, mais 60 mensagens SQS, todas nas mesmas 4 wallets. Cada aposta é aplicada uma vez, todas as wallets reconciliam, e mais de uma instância consumiu da fila.
   - **Cenário 5:** a instância morre com código 137 depois do commit. A transação está confirmada e a mensagem não foi removida. Outra instância recebe a redelivery, a inbox a reconhece (replay) e o efeito é único.
   - **Cenário 8:** `SIGKILL` em todas as instâncias com requisições em voo, 3 instâncias novas e o cliente reenviando com a mesma key o que ficou sem resposta. A fila redistribui o que estava em voo, o worker resolve os REFUNDs que chegaram antes das apostas e tudo é aplicado uma única vez, com as wallets fechando exatamente no saldo esperado.
+
+### D25. Métricas
+
+`GET /metrics` (formato Prometheus, aberto como os health checks) é servido em todos os papéis. Cada instância expõe as suas métricas; o agregado entre réplicas fica com o Prometheus.
+
+| Métrica | Tipo | O que mede |
+|---|---|---|
+| `wagering_transactions_total{kind,status,source,replay}` | counter | transações decididas, por tipo, status e origem (`http`, `sqs`, `worker`), separando replays |
+| `wagering_duplicates_detected_total{layer}` | counter | repetições reconhecidas: na pré-checagem, pela key sob o lock ou pela inbox |
+| `wagering_lock_conflicts_total{type}` | counter | lock timeout e conflito de versão/serialização |
+| `wagering_retries_total{component,reason}` | counter | novas tentativas do use case, do consumer, do publisher e do worker de pendências |
+| `wagering_dead_letter_messages_total{reason}` | counter | mensagens movidas para a DLQ, por motivo |
+| `wagering_dead_letter_queue_depth` | gauge | mensagens paradas na DLQ (lido do SQS no scrape) |
+| `wagering_outbox_lag_seconds` | gauge | idade do evento pendente mais antigo (lido do banco no scrape) |
+| `wagering_outbox_pending_messages` | gauge | eventos ainda não publicados |
+| `wagering_outbox_published_total` | counter | eventos publicados |
+| `wagering_processing_duration_seconds{source}` | histogram | latência de processamento de uma transação |
+| `wagering_reconciliation_mismatches_total` | counter | reconciliações que não fecharam |
+
+O que só o use case enxerga (em que camada a duplicata foi detectada, conflitos e repetições internas) passa por uma porta mínima da aplicação, `WageringMetrics`. O resto é contado nas bordas. As métricas padrão de processo do `prom-client` também são expostas. Um gauge que falha ao ler (banco ou SQS fora) não derruba o scrape.
 
 ## Interpretações adotadas
 

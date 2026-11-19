@@ -303,11 +303,16 @@ class MikroOrmOutboxRepository implements OutboxRepository {
     }
   }
 
-  async oldestPendingAgeMs(now: Date): Promise<number> {
-    const [row] = await this.em.execute<{ oldest: string | null }[]>(
-      'select min(occurred_at)::text as oldest from outbox_messages where published_at is null',
+  async pendingStats(now: Date): Promise<{ readonly pending: number; readonly oldestAgeMs: number }> {
+    const [row] = await this.em.execute<{ pending: number; oldest: string | null }[]>(
+      `select count(*)::int as pending, min(occurred_at)::text as oldest
+         from outbox_messages where published_at is null`,
     );
-    return row?.oldest == null ? 0 : Math.max(0, now.getTime() - new Date(row.oldest).getTime());
+    const oldest = row?.oldest == null ? undefined : new Date(row.oldest).getTime();
+    return {
+      pending: row?.pending ?? 0,
+      oldestAgeMs: oldest === undefined ? 0 : Math.max(0, now.getTime() - oldest),
+    };
   }
 }
 

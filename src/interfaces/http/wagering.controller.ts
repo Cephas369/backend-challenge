@@ -5,6 +5,7 @@ import { SubmitWagerTransaction } from '../../application/wagering/submit-wager-
 import { GetWagerTransaction } from '../../application/wagering/wager-transaction-queries';
 import { addToLogContext } from '../../infrastructure/observability/log-context';
 import type { AppLogger } from '../../infrastructure/observability/logger';
+import { PrometheusMetrics } from '../../infrastructure/observability/metrics';
 import { LOGGER } from '../../infrastructure/tokens';
 import { idempotencyKeyContract, opaqueId, wagerTransactionContract } from '../contracts/wager-contracts';
 import { currentCorrelationId } from './correlation-id.middleware';
@@ -16,6 +17,7 @@ export class WageringController {
   constructor(
     private readonly submitTransaction: SubmitWagerTransaction,
     private readonly transactions: GetWagerTransaction,
+    private readonly metrics: PrometheusMetrics,
     @Inject(LOGGER) private readonly logger: AppLogger,
   ) {}
 
@@ -38,12 +40,15 @@ export class WageringController {
     const input = parseRequest(wagerTransactionContract, body, 'corpo');
     addToLogContext({ providerId: input.providerId, walletId: input.walletId });
 
+    const startedAt = performance.now();
     const result = await this.submitTransaction.execute({
       ...input,
       money: parseMoney(input.money, 'money'),
       idempotencyKey: key,
       correlationId: currentCorrelationId(),
     });
+    this.metrics.observeProcessing('http', (performance.now() - startedAt) / 1_000);
+    this.metrics.transactionDecided(input.kind, result.status, 'http', result.idempotentReplay);
 
     addToLogContext({ transactionId: result.transactionId });
     this.logger.info(

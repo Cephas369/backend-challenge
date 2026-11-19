@@ -47,6 +47,21 @@ export interface WagerConsumerOptions {
   readonly beforeAck?: (() => Promise<void>) | undefined;
 }
 
+/** O que o consumer conta (o PrometheusMetrics atende a esta interface). */
+export interface ConsumerMetrics {
+  transactionDecided(kind: string, status: string, source: 'sqs', replay: boolean): void;
+  observeProcessing(source: 'sqs', seconds: number): void;
+  retryScheduled(component: string, reason: string): void;
+  deadLettered(reason: string): void;
+}
+
+const NO_METRICS: ConsumerMetrics = {
+  transactionDecided: () => {},
+  observeProcessing: () => {},
+  retryScheduled: () => {},
+  deadLettered: () => {},
+};
+
 export type MessageDisposition =
   | { readonly kind: 'ack' }
   | { readonly kind: 'retry'; readonly reason: string; readonly pause: boolean }
@@ -73,6 +88,7 @@ export class WagerTransactionConsumer {
     private readonly submit: SubmitWagerTransaction,
     private readonly options: WagerConsumerOptions,
     private readonly logger: AppLogger,
+    private readonly metrics: ConsumerMetrics = NO_METRICS,
   ) {}
 
   start(): void {
@@ -204,6 +220,7 @@ export class WagerTransactionConsumer {
   private async process(envelope: WagerTransactionRequestedMessage): Promise<MessageDisposition> {
     try {
       const { data } = envelope;
+      const startedAt = performance.now();
       const result = await this.submit.execute({
         ...data,
         money: Money.from(data.money),
@@ -214,6 +231,8 @@ export class WagerTransactionConsumer {
           payloadHash: messagePayloadHash(envelope),
         },
       });
+      this.metrics.observeProcessing('sqs', (performance.now() - startedAt) / 1_000);
+      this.metrics.transactionDecided(data.kind, result.status, 'sqs', result.idempotentReplay);
       this.logger.info(
         {
           transactionId: result.transactionId,
@@ -242,6 +261,7 @@ export class WagerTransactionConsumer {
     if (disposition.pause) {
       this.pausedUntil = Date.now() + (this.options.unavailablePauseMs ?? 5_000);
     }
+    this.metrics.retryScheduled('consumer', disposition.reason);
     this.logger.warn(
       { reason: disposition.reason, receiveCount, retryInSeconds: delay },
       'wager message will be retried',
@@ -280,6 +300,7 @@ export class WagerTransactionConsumer {
     await this.sqs.send(
       new DeleteMessageCommand({ QueueUrl: queueUrl, ReceiptHandle: message.ReceiptHandle }),
     );
+    this.metrics.deadLettered(disposition.reason);
     this.logger.error(
       { reason: disposition.reason, receiveCount },
       'wager message moved to the dead-letter queue',

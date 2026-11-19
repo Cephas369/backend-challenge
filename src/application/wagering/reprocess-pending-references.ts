@@ -23,9 +23,17 @@ export interface ReprocessRound {
   readonly deferred: number;
   /** Erro permanente: marcada FAILED para auditoria. */
   readonly failed: number;
+  /** Tipo e status de cada transação decidida nesta rodada (para métricas). */
+  readonly decisions: readonly { readonly kind: string; readonly status: string }[];
 }
 
 type Disposition = 'processed' | 'rejected' | 'stillWaiting' | 'skipped';
+
+interface Reprocessed {
+  readonly disposition: Disposition;
+  readonly kind?: string;
+  readonly status?: string;
+}
 
 /**
  * Worker de referências fora de ordem (seção 7.1). Reivindica pendências vencidas sem esperar lock
@@ -57,12 +65,16 @@ export class ReprocessPendingReferences {
       stillWaiting: 0,
       deferred: 0,
       failed: 0,
+      decisions: [] as { kind: string; status: string }[],
     };
     for (const claim of claims) {
       try {
-        const disposition = await this.reprocess(claim);
+        const { disposition, kind, status } = await this.reprocess(claim);
         if (disposition !== 'skipped') {
           round[disposition] += 1;
+        }
+        if (kind !== undefined && status !== undefined && disposition !== 'stillWaiting') {
+          round.decisions.push({ kind, status });
         }
       } catch (error) {
         if (error instanceof TransientInfrastructureError || error instanceof ConcurrencyConflictError) {
@@ -82,13 +94,13 @@ export class ReprocessPendingReferences {
     return round;
   }
 
-  private reprocess(claim: PendingReferenceClaim): Promise<Disposition> {
+  private reprocess(claim: PendingReferenceClaim): Promise<Reprocessed> {
     return this.unitOfWork.transaction(async ({ wallets, transactions, ledger, outbox }) => {
       const wallet = await wallets.lockById(claim.walletId);
       // relida sob o lock da wallet: outra instância pode ter decidido antes
       const transaction = await transactions.findById(claim.transactionId);
       if (wallet === undefined || transaction?.status !== WagerTransactionStatus.PendingReference) {
-        return 'skipped';
+        return { disposition: 'skipped' };
       }
       const now = this.clock.now();
       const reference = await resolveReference(transactions, transaction);
@@ -117,11 +129,13 @@ export class ReprocessPendingReferences {
         occurredAt: now,
       }));
       await outbox.append(events.map((event) => OutboxMessage.enqueue(event)));
-      return outcome.type === 'PROCESSED'
-        ? 'processed'
-        : outcome.type === 'REJECTED'
-          ? 'rejected'
-          : 'stillWaiting';
+      const disposition: Disposition =
+        outcome.type === 'PROCESSED'
+          ? 'processed'
+          : outcome.type === 'REJECTED'
+            ? 'rejected'
+            : 'stillWaiting';
+      return { disposition, kind: transaction.kind, status: transaction.status };
     });
   }
 

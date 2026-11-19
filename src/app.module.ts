@@ -2,6 +2,7 @@ import { type DynamicModule, Module } from '@nestjs/common';
 import type { AppConfig } from './infrastructure/config/config';
 import { CoreModule } from './infrastructure/core.module';
 import type { AppLogger } from './infrastructure/observability/logger';
+import { MetricsModule } from './infrastructure/observability/metrics.module';
 import { PersistenceModule } from './infrastructure/persistence/persistence.module';
 import { SqsModule } from './infrastructure/sqs/sqs.module';
 import { HealthModule } from './interfaces/http/health/health.module';
@@ -18,6 +19,7 @@ export class AppModule {
         CoreModule.forRoot(config, logger),
         PersistenceModule.forRoot(),
         SqsModule.forRoot(),
+        MetricsModule.forRoot(),
         UseCasesModule,
         HealthModule,
         MessagingModule.forRoot(),

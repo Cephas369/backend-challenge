@@ -8,6 +8,7 @@ import { GetWallet, ListLedger, ReconcileWallet } from './application/wallets/wa
 import { ReferenceRetryPolicy } from './domain/wagering/reference-retry-policy';
 import { WagerSettlement } from './domain/wagering/wager-settlement';
 import type { AppConfig } from './infrastructure/config/config';
+import { PrometheusMetrics } from './infrastructure/observability/metrics';
 import { systemClock, uuidV7Generator } from './infrastructure/runtime';
 import { APP_CONFIG, CLOCK, ID_GENERATOR, UNIT_OF_WORK } from './infrastructure/tokens';
 
@@ -49,9 +50,14 @@ import { APP_CONFIG, CLOCK, ID_GENERATOR, UNIT_OF_WORK } from './infrastructure/
     },
     {
       provide: SubmitWagerTransaction,
-      inject: [UNIT_OF_WORK, WagerSettlement, CLOCK, ID_GENERATOR],
-      useFactory: (unitOfWork: UnitOfWork, settlement: WagerSettlement, clock: Clock, ids: IdGenerator) =>
-        new SubmitWagerTransaction(unitOfWork, settlement, clock, ids),
+      inject: [UNIT_OF_WORK, WagerSettlement, CLOCK, ID_GENERATOR, PrometheusMetrics],
+      useFactory: (
+        unitOfWork: UnitOfWork,
+        settlement: WagerSettlement,
+        clock: Clock,
+        ids: IdGenerator,
+        metrics: PrometheusMetrics,
+      ) => new SubmitWagerTransaction(unitOfWork, settlement, clock, ids, metrics),
     },
     {
       provide: GetWagerTransaction,

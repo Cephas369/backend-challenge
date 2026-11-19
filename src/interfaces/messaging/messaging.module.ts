@@ -14,6 +14,7 @@ import { SubmitWagerTransaction } from '../../application/wagering/submit-wager-
 import { WagerSettlement } from '../../domain/wagering/wager-settlement';
 import type { AppConfig } from '../../infrastructure/config/config';
 import type { AppLogger } from '../../infrastructure/observability/logger';
+import { PrometheusMetrics } from '../../infrastructure/observability/metrics';
 import { QueueUrls } from '../../infrastructure/sqs/queue-urls';
 import { SqsEventPublisher } from '../../infrastructure/sqs/sqs-event-publisher';
 import {
@@ -93,13 +94,14 @@ export class MessagingModule implements OnApplicationBootstrap, BeforeApplicatio
         },
         {
           provide: WagerTransactionConsumer,
-          inject: [SQS_CLIENT, QueueUrls, SubmitWagerTransaction, APP_CONFIG, LOGGER],
+          inject: [SQS_CLIENT, QueueUrls, SubmitWagerTransaction, APP_CONFIG, LOGGER, PrometheusMetrics],
           useFactory: (
             client: SQSClient,
             queues: QueueUrls,
             submit: SubmitWagerTransaction,
             config: AppConfig,
             logger: AppLogger,
+            metrics: PrometheusMetrics,
           ) =>
             new WagerTransactionConsumer(
               client,
@@ -120,26 +122,50 @@ export class MessagingModule implements OnApplicationBootstrap, BeforeApplicatio
                     : undefined,
               },
               logger.child({ component: 'wager-consumer' }),
+              metrics,
             ),
         },
         {
           provide: OUTBOX_WORKER,
-          inject: [PublishOutboxBatch, APP_CONFIG, LOGGER],
-          useFactory: (publish: PublishOutboxBatch, config: AppConfig, logger: AppLogger) =>
+          inject: [PublishOutboxBatch, APP_CONFIG, LOGGER, PrometheusMetrics],
+          useFactory: (
+            publish: PublishOutboxBatch,
+            config: AppConfig,
+            logger: AppLogger,
+            metrics: PrometheusMetrics,
+          ) =>
             new PollingWorker(
               'outbox-publisher',
-              async () => (await publish.run()).attempted,
+              async () => {
+                const round = await publish.run();
+                metrics.outboxPublished(round.published);
+                metrics.retryScheduled('outbox', 'publish-failed', round.failed);
+                return round.attempted;
+              },
               { idleDelayMs: config.messaging.outboxIdleDelayMs },
               logger.child({ component: 'outbox-publisher' }),
             ),
         },
         {
           provide: PENDING_REFERENCE_WORKER,
-          inject: [ReprocessPendingReferences, APP_CONFIG, LOGGER],
-          useFactory: (reprocess: ReprocessPendingReferences, config: AppConfig, logger: AppLogger) =>
+          inject: [ReprocessPendingReferences, APP_CONFIG, LOGGER, PrometheusMetrics],
+          useFactory: (
+            reprocess: ReprocessPendingReferences,
+            config: AppConfig,
+            logger: AppLogger,
+            metrics: PrometheusMetrics,
+          ) =>
             new PollingWorker(
               'pending-reference',
-              async () => (await reprocess.run()).claimed,
+              async () => {
+                const round = await reprocess.run();
+                for (const decision of round.decisions) {
+                  metrics.transactionDecided(decision.kind, decision.status, 'worker', false);
+                }
+                metrics.retryScheduled('pending-reference', 'reference-missing', round.stillWaiting);
+                metrics.retryScheduled('pending-reference', 'transient', round.deferred);
+                return round.claimed;
+              },
               { idleDelayMs: config.messaging.pendingReferenceIdleDelayMs },
               logger.child({ component: 'pending-reference' }),
             ),

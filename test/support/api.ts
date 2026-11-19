@@ -15,6 +15,7 @@ export interface ApiResponse<T = Record<string, unknown>> {
 
 export interface TestApi {
   readonly db: MigratedDatabase;
+  readonly baseUrl: string;
   request<T = Record<string, unknown>>(
     method: 'GET' | 'POST',
     path: string,
@@ -106,6 +107,7 @@ export async function startTestApi(
 
   return {
     db,
+    baseUrl,
     request,
     async createWallet(initialBalance = '100.00', currency = 'BRL') {
       const response = await request<WalletBody>('POST', '/wallets', {

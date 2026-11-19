@@ -4,6 +4,7 @@ import { CreateWallet } from '../../application/wallets/create-wallet';
 import { GetWallet, ListLedger, ReconcileWallet } from '../../application/wallets/wallet-queries';
 import { addToLogContext } from '../../infrastructure/observability/log-context';
 import type { AppLogger } from '../../infrastructure/observability/logger';
+import { PrometheusMetrics } from '../../infrastructure/observability/metrics';
 import { LOGGER } from '../../infrastructure/tokens';
 import { createWalletContract, ledgerQueryContract } from '../contracts/wager-contracts';
 import { currentCorrelationId } from './correlation-id.middleware';
@@ -19,6 +20,7 @@ export class WalletsController {
     private readonly getWallet: GetWallet,
     private readonly listLedger: ListLedger,
     private readonly reconcileWallet: ReconcileWallet,
+    private readonly metrics: PrometheusMetrics,
     @Inject(LOGGER) private readonly logger: AppLogger,
   ) {}
 
@@ -64,6 +66,7 @@ export class WalletsController {
     if (report.consistent) {
       this.logger.info({ checkedEntries: report.checkedEntries }, 'wallet reconciled');
     } else {
+      this.metrics.reconciliationMismatch();
       this.logger.error(
         { checkedEntries: report.checkedEntries, issues: report.issues },
         'reconciliation mismatch',

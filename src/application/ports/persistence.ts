@@ -84,8 +84,8 @@ export interface OutboxRepository {
   claimDue(now: Date, limit: number): Promise<OutboxMessage[]>;
   /** Grava o resultado da tentativa (publicada, ou tentativas, próxima tentativa e último erro). */
   save(message: OutboxMessage): Promise<void>;
-  /** Idade da mensagem pendente mais antiga, em ms (outbox lag); 0 se não há pendentes. */
-  oldestPendingAgeMs(now: Date): Promise<number>;
+  /** Quantas mensagens estão pendentes e a idade da mais antiga, em ms (outbox lag). */
+  pendingStats(now: Date): Promise<{ readonly pending: number; readonly oldestAgeMs: number }>;
 }
 
 /** Repositórios ligados a uma mesma transação. */

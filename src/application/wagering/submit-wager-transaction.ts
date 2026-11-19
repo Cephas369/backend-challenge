@@ -12,9 +12,11 @@ import {
   IdempotencyConflictError,
   InboxPayloadMismatchError,
   PersistenceInvariantError,
+  TransientInfrastructureError,
   UniquenessViolationError,
   WalletNotFoundError,
 } from '../errors';
+import { noopMetrics, type WageringMetrics } from '../ports/metrics';
 import type { Repositories, UnitOfWork, WagerTransactionRepository } from '../ports/persistence';
 import type { Clock, IdGenerator } from '../ports/runtime';
 import { settlementEvents } from './settlement-events';
@@ -66,6 +68,7 @@ export class SubmitWagerTransaction {
     private readonly settlement: WagerSettlement,
     private readonly clock: Clock,
     private readonly ids: IdGenerator,
+    private readonly metrics: WageringMetrics = noopMetrics,
   ) {}
 
   async execute(command: SubmitWagerTransactionCommand): Promise<WagerTransactionResult> {
@@ -78,7 +81,9 @@ export class SubmitWagerTransaction {
       transactions.findByIdempotencyKey(command.providerId, command.idempotencyKey),
     );
     if (known !== undefined) {
-      return replay(known, requestHash);
+      const result = replay(known, requestHash);
+      this.metrics.duplicateDetected('pre-check');
+      return result;
     }
 
     for (let attempt = 1; ; attempt += 1) {
@@ -91,8 +96,15 @@ export class SubmitWagerTransaction {
           // a mesma key ou o mesmo externalTransactionId foi gravado em paralelo (noutra wallet)
           return this.resolveConcurrentDuplicate(command, requestHash);
         }
-        if (error instanceof ConcurrencyConflictError && attempt < MAX_ATTEMPTS) {
-          continue;
+        if (error instanceof ConcurrencyConflictError) {
+          this.metrics.concurrencyConflict('concurrency-conflict');
+          if (attempt < MAX_ATTEMPTS) {
+            this.metrics.retryScheduled('submit', 'concurrency-conflict');
+            continue;
+          }
+        }
+        if (error instanceof TransientInfrastructureError && error.reason === 'LOCK_TIMEOUT') {
+          this.metrics.concurrencyConflict('lock-timeout');
         }
         throw error;
       }
@@ -110,7 +122,9 @@ export class SubmitWagerTransaction {
     if (command.message !== undefined) {
       inboxMessage = InboxMessage.receive({ ...command.message, receivedAt: now });
       if (!(await inbox.tryInsert(inboxMessage))) {
-        return this.replayDeliveredMessage(command, requestHash, inbox, transactions);
+        const result = await this.replayDeliveredMessage(command, requestHash, inbox, transactions);
+        this.metrics.duplicateDetected('inbox');
+        return result;
       }
     }
 
@@ -124,6 +138,7 @@ export class SubmitWagerTransaction {
     if (existing !== undefined) {
       const result = replay(existing, requestHash);
       await this.markHandled(inboxMessage, now, inbox);
+      this.metrics.duplicateDetected('idempotency-key');
       return result;
     }
     const sameExternalId = await transactions.findByExternalId(
@@ -196,7 +211,9 @@ export class SubmitWagerTransaction {
     if (existing.idempotencyKey !== command.idempotencyKey) {
       throw new ExternalTransactionConflictError(existing.id);
     }
-    return replay(existing, requestHash);
+    const result = replay(existing, requestHash);
+    this.metrics.duplicateDetected('idempotency-key');
+    return result;
   }
 
   private async markHandled(
