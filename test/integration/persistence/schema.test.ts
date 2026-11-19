@@ -90,9 +90,18 @@ describe('migrations', () => {
         );
       return rows.map((row) => row.name);
     };
+    const outboxIndexes = async () => {
+      const rows = await orm.em
+        .fork()
+        .execute<{ name: string }[]>(
+          "select indexname as name from pg_indexes where tablename = 'outbox_messages' and indexname like 'outbox_%_ix'",
+        );
+      return rows.map((row) => row.name);
+    };
     try {
       expect((await orm.migrator.getPending()).map((migration) => migration.name)).toEqual([
         'Migration20261119000000_initial_schema',
+        'Migration20261119140000_outbox_claim_index',
       ]);
       await orm.migrator.up();
       expect(await tables()).toEqual([
@@ -102,10 +111,16 @@ describe('migrations', () => {
         'wallet_ledger_entries',
         'wallets',
       ]);
-      await orm.migrator.down();
+      expect(await outboxIndexes()).toEqual(['outbox_pending_ix']);
+
+      await orm.migrator.down(); // só a última
+      expect(await outboxIndexes()).toEqual(['outbox_due_ix']);
+      await orm.migrator.down({ to: 0 });
       expect(await tables()).toEqual([]);
+
       await orm.migrator.up();
       expect(await tables()).toHaveLength(5);
+      expect(await outboxIndexes()).toEqual(['outbox_pending_ix']);
     } finally {
       await orm.close();
       await database.drop();

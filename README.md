@@ -16,8 +16,9 @@ Serviço financeiro distribuído que processa transações de apostas (`BET`, `W
 | Idempotência | key e `externalTransactionId` únicos no banco, `payloadHash` canônico e replay com o saldo da época ([D9, D17](ARCHITECTURE.md)) |
 | Mensageria e falhas | inbox e outbox na transação do efeito, `SKIP LOCKED`, DLQ com motivo, referências fora de ordem com TTL, shutdown gracioso, queda entre commit e ack ([D20–D24](ARCHITECTURE.md)) |
 | Modelagem e arquitetura | domínio puro em `src/domain`, portas em `src/application` e um teste que barra dependência indevida entre camadas |
-| Testes | mais de 320 testes; PostgreSQL e SQS reais, sem mocks de infraestrutura |
+| Testes | mais de 330 testes; PostgreSQL e SQS reais, sem mocks de infraestrutura |
 | Observabilidade | logs JSON com correlação e sem valores financeiros, `/metrics` e health de liveness e readiness ([D5, D25](ARCHITECTURE.md)) |
+| Teste de carga (diferencial) | `bun run test:load`: throughput, p50/p95/p99, taxa de erro, conflitos e outbox lag, com as invariantes financeiras conferidas no fim ([docs/TESTE-DE-CARGA.md](docs/TESTE-DE-CARGA.md)) |
 
 ## Subir tudo
 
@@ -114,6 +115,7 @@ bun run test:unit          # domínio e bordas, sem infraestrutura
 bun run test:integration   # schema, repositórios, API, consumer, outbox, worker, shutdown
 bun run test:concurrency   # paralelismo real e processos reais
 bun run typecheck && bun run lint
+bun run test:load          # teste de carga, fora da suíte (cerca de 10 minutos)
 ```
 
 Cada suíte de integração cria um banco e filas próprios e remove tudo no fim. Ao final dos testes de API e de concorrência, a invariante `wallet.balance == saldo reconstruído pelo ledger` é conferida pela própria reconciliação. Os testes rodam com os logs desligados; para ligá-los, use `TEST_LOG_LEVEL=debug`.
@@ -144,6 +146,7 @@ Onde estão os testes obrigatórios da seção 13:
 | `bun run sqs:dlq` | mostra até 10 mensagens da DLQ com o motivo, sem removê-las |
 | `source scripts/demo.sh` | helpers de shell para demonstrar a API pelo terminal |
 | `bun run test` / `test:unit` / `test:integration` / `test:concurrency` | testes |
+| `bun run test:load` | teste de carga com instâncias reais; relatório em `load-results/` (ver [docs/TESTE-DE-CARGA.md](docs/TESTE-DE-CARGA.md)) |
 | `bun run typecheck` / `bun run lint` / `bun run lint:fix` | TypeScript 7 sem emitir; Biome |
 
 ## Estrutura
@@ -154,14 +157,14 @@ src/
   application/     use cases e portas (persistência, relógio, ids, métricas, identidade do provedor)
   infrastructure/  config, logs e métricas, MikroORM (schema, migrations, repositórios), SQS
   interfaces/      HTTP, consumer SQS e workers
-test/              unit, integration, concurrency e support (bancos, filas e processos descartáveis)
+test/              unit, integration, concurrency, load e support (bancos, filas e processos descartáveis)
 scripts/           envio de mensagem de exemplo, leitura da DLQ e helpers da demonstração
 infra/             nginx e o usuário de banco da aplicação
-docs/              enunciado do desafio
+docs/              enunciado do desafio e relatório do teste de carga
 ```
 
 ## Notas
 
 - **MiniStack em vez de LocalStack:** a LocalStack atual não sobe sem conta (`LOCALSTACK_AUTH_TOKEN`). A MiniStack é livre, e os recursos usados (FIFO, dedup, redrive, visibilidade) estão validados por teste ([D2](ARCHITECTURE.md#d2-emulador-sqs-ministack-não-localstack)).
 - **Autenticação:** não implementada, por decisão. O desenho e o ponto de extensão estão na [D26](ARCHITECTURE.md#d26-autenticação).
-- **Teste de carga:** é opcional e não foi feito; está entre os próximos passos do [ARCHITECTURE.md](ARCHITECTURE.md#limitações-conhecidas-e-próximos-passos).
+- **Teste de carga:** `bun run test:load` sobe 3 instâncias reais sobre um banco e filas exclusivos, roda wallets distribuídas, hot wallet e ingestão pela fila, e confere no fim que o dinheiro fecha. Ambiente, metodologia, resultados e análise estão em [docs/TESTE-DE-CARGA.md](docs/TESTE-DE-CARGA.md).

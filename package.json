@@ -13,6 +13,8 @@
     "test:unit": "bun test test/unit",
     "test:integration": "bun test --timeout 30000 test/integration",
     "test:concurrency": "bun test --timeout 60000 test/concurrency",
+    "test:load": "bun test/load/run.ts",
+    "test:load:micro": "bun test/load/micro-benchmarks.ts",
     "infra:up": "docker compose up -d --wait postgres sqs",
     "infra:down": "docker compose down",
     "sqs:setup": "bun src/infrastructure/sqs/setup-queues.ts",

@@ -6,7 +6,7 @@ Este documento registra as decisões técnicas do Distributed Wagering Processor
 - Os 8 cenários de concorrência da seção 13 passam com paralelismo real, inclusive com processos reais morrendo no meio do caminho.
 - O compose sobe 3 réplicas atrás de um nginx, com a aplicação conectada por um usuário de privilégio mínimo, e `/metrics` expõe as métricas da seção 12.
 - A autenticação ficou de fora por decisão; o desenho e o ponto de extensão estão na [D26](#d26-autenticação).
-- O teste de carga (opcional) não foi feito. O que falta para produção está em [Limitações conhecidas e próximos passos](#limitações-conhecidas-e-próximos-passos).
+- O teste de carga (`bun run test:load`) mediu os limites e corrigiu o índice da claim da outbox ([D27](#d27-teste-de-carga); números em [docs/TESTE-DE-CARGA.md](docs/TESTE-DE-CARGA.md)). O que falta para produção está em [Limitações conhecidas e próximos passos](#limitações-conhecidas-e-próximos-passos).
 
 ## Visão geral
 
@@ -64,6 +64,7 @@ test/
   unit/            sem dependências externas
   integration/     PostgreSQL e MiniStack reais
   concurrency/     paralelismo real e processos reais da aplicação
+  load/            teste de carga (`bun run test:load`) e micro-medições, fora da suíte
   support/         bancos e filas descartáveis, processo real da aplicação, waitFor
 scripts/           envio de mensagem de exemplo, leitura da DLQ e helpers da demonstração
 infra/             nginx e o usuário de banco da aplicação
@@ -325,7 +326,7 @@ Um único mapeamento ([problem-details.ts](src/interfaces/http/problem-details.t
 ### D21. Publisher da outbox
 
 [PublishOutboxBatch](src/application/messaging/publish-outbox.ts) faz, numa transação:
-1. `claimDue` com `FOR UPDATE SKIP LOCKED`, para que publishers concorrentes peguem lotes disjuntos sem esperar uns pelos outros;
+1. `claimDue` com `FOR UPDATE SKIP LOCKED`, para que publishers concorrentes peguem lotes disjuntos sem esperar uns pelos outros. A claim percorre o índice parcial `outbox_pending_ix (occurred_at, id) where published_at is null` na ordem e para no 10º evento devido. O índice original, por `next_attempt_at`, obrigava a ordenar todo o backlog a cada lote; a troca veio do teste de carga (D27);
 2. `SendMessageBatch` com timeout curto;
 3. marca cada mensagem como publicada ou chama `scheduleRetry`.
 
@@ -401,6 +402,24 @@ O que só o use case enxerga (em que camada a duplicata foi detectada, conflitos
 - **Como ligar:** implementar a porta (validação do JWT) e passá-la em `createApp(config, logger, { providerIdentity })`. Nada mais muda: 401, 403 e 404 já estão mapeados.
 - **Teste:** [provider-auth.test.ts](test/integration/http/provider-auth.test.ts) exercita esse caminho com uma identidade de teste no lugar do IdP.
 
+### D27. Teste de carga
+
+`bun run test:load` ([test/load](test/load)) sobe instâncias reais da aplicação sobre um banco exclusivo, roda três cenários e só dá certo se o dinheiro fechar no fim. Os cenários são wallets distribuídas, hot wallet com concorrência crescente e ingestão pela fila. Ambiente, metodologia, números e análise estão em [docs/TESTE-DE-CARGA.md](docs/TESTE-DE-CARGA.md).
+
+**Desenho do experimento:**
+- **Isolamento:** cada cenário roda com filas e instâncias novas e começa com a outbox vazia.
+- **Consumidor de eventos:** um consumidor no papel do downstream esvazia a fila de eventos e confere que cada evento publicado chegou.
+- **Sonda do broker:** mede a latência da fila de eventos ao longo do tempo.
+- **Por que tudo isso:** sem esses cuidados, a medição era da MiniStack. Ela fica mais lenta conforme uma fila FIFO acumula histórico de deduplicação, mesmo vazia: o envio de um lote passa de 2,3 ms para 23 ms depois de 15 mil mensagens.
+
+**O que o teste mudou no código:** a claim da outbox ordenava todo o backlog a cada lote, porque o índice parcial (`next_attempt_at`) não servia ao `ORDER BY occurred_at, id`. Com 40 mil pendentes, cada claim custava 15,9 ms (seq scan e ordenação em disco). A migration `Migration20261119140000OutboxClaimIndex` troca o índice por `outbox_pending_ix (occurred_at, id) where published_at is null`, e a mesma claim passa a custar 0,03 ms. Sem a troca, quanto maior o atraso, mais lenta ficava a publicação.
+
+**O que o teste confirmou:**
+- **Correção sob carga:** as invariantes valeram em todas as rodadas, com cerca de 27 mil operações HTTP, 3 mil mensagens e 75 mil eventos por rodada completa. Nenhum 5xx, nenhum lock timeout, nenhum conflito de versão.
+- **Throughput:** 3 instâncias sustentam 860–910 op/s nesta máquina, limitadas pela CPU das instâncias, ~3,8 ms por operação.
+- **Hot wallet:** uma wallet fica em 150–205 op/s, porque o lock da linha dura ~5,6 ms por operação.
+- **Outbox:** a publicação ficou presa ao emulador, entre 67 e 370 eventos/s contra ~1.500 produzidos, e o atraso chegou a 5 minutos, sem perda nem duplicata.
+
 ## Interpretações adotadas
 
 Pontos que o enunciado deixa em aberto e como foram decididos:
@@ -424,9 +443,12 @@ Pontos que o enunciado deixa em aberto e como foram decididos:
 ## Limitações conhecidas e próximos passos
 
 - **Autenticação:** não implementada; desenho e ponto de extensão na [D26](#d26-autenticação).
-- **Teste de carga:** é opcional e não foi feito, então não há números de throughput nem de latência.
-  - O limite conhecido é a hot wallet. As transações de uma mesma wallet são serializadas pelo lock da linha, e o throughput de uma wallet fica limitado pelo tempo que cada transação segura esse lock.
-  - Wallets diferentes escalam em paralelo.
+- **Limites medidos** ([D27](#d27-teste-de-carga)):
+  - **Hot wallet:** uma wallet fica em 150–205 op/s, e a fila do lock não é justa (cauda longa). Uma wallet da casa precisaria agrupar operações por transação.
+  - **Pool compartilhado:** pedidos esperando o lock seguram conexões do pool, e uma wallet disputada pode atrasar outras na mesma instância. Não foi medido.
+  - **Publicação da outbox:** um laço sequencial por instância, com lotes de 10, pode não acompanhar o pico mesmo com o SQS real. Os próximos passos são laços paralelos, marcar o lote com um `UPDATE` só e não segurar a transação durante o envio.
+  - **Consumer:** apaga as mensagens uma a uma; `DeleteMessageBatch` e mais laços de consumo aumentariam a ingestão.
+  - **Validação pendente:** os números vêm de uma máquina só e de um emulador SQS. Falta repetir contra o SQS real, com máquinas separadas e um teste longo.
 - **Retenção:** nada limpa a inbox nem a outbox publicada. Um job de expurgo precisaria:
   - guardar a inbox por mais tempo que a retenção da fila, que é o prazo em que uma redelivery ainda pode chegar;
   - guardar a outbox publicada pelo prazo de auditoria.
