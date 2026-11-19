@@ -18,7 +18,9 @@
     "sqs:setup": "bun src/infrastructure/sqs/setup-queues.ts",
     "db:migrate": "bun src/infrastructure/persistence/migrate.ts up",
     "db:rollback": "bun src/infrastructure/persistence/migrate.ts down",
-    "db:pending": "bun src/infrastructure/persistence/migrate.ts pending"
+    "db:pending": "bun src/infrastructure/persistence/migrate.ts pending",
+    "sqs:send": "bun scripts/send-wager-message.ts",
+    "sqs:dlq": "bun scripts/peek-dead-letters.ts"
   },
   "dependencies": {
     "@aws-sdk/client-sqs": "3.1172.0",

@@ -9,6 +9,7 @@ import {
   WalletAlreadyExistsError,
   WalletNotFoundError,
 } from '../../application/errors';
+import { ProviderAuthenticationError } from '../../application/ports/provider-identity';
 import { InvalidMoneyError } from '../../domain/money/money';
 import {
   InvalidWagerTransactionError,
@@ -16,6 +17,7 @@ import {
 } from '../../domain/wagering/wager-transaction';
 import { currentLogContext } from '../../infrastructure/observability/log-context';
 import type { AppLogger } from '../../infrastructure/observability/logger';
+import { ProviderMismatchError } from './provider-auth.guard';
 import { RequestValidationError, type ValidationIssue } from './request-validation';
 
 /** Problem Details (RFC 9457) com `code` estável e `retryable` explícito. */
@@ -55,8 +57,9 @@ const invalid = (code: string, detail: string, errors?: readonly ValidationIssue
 });
 
 /**
- * Único mapeamento de erro para HTTP, usado por todos os endpoints: payload inválido (400),
- * inexistente (404), conflito (409), falha transitória (503) e erro interno (500) nunca se confundem.
+ * Único mapeamento de erro para HTTP, usado por todos os endpoints: payload inválido (400), sem
+ * credencial (401), outro provedor (403), inexistente (404), conflito (409), falha transitória (503)
+ * e erro interno (500) nunca se confundem.
  * Rejeição de negócio (422) e aceite pendente (202) não passam por aqui: são resultados de transação.
  */
 export function problemFor(error: unknown): Problem {
@@ -68,6 +71,18 @@ export function problemFor(error: unknown): Problem {
   }
   if (error instanceof InvalidWagerTransactionError) {
     return invalid(CONTRACT_CODES[error.reason], error.message);
+  }
+  if (error instanceof ProviderAuthenticationError) {
+    return {
+      status: 401,
+      code: error.code,
+      title: 'Não autenticado',
+      detail: error.message,
+      retryable: false,
+    };
+  }
+  if (error instanceof ProviderMismatchError) {
+    return { status: 403, code: error.code, title: 'Proibido', detail: error.message, retryable: false };
   }
   if (error instanceof WalletNotFoundError || error instanceof TransactionNotFoundError) {
     return {
@@ -150,6 +165,9 @@ export class ProblemDetailsFilter implements ExceptionFilter {
     }
     if (problem.retryable) {
       response.setHeader('Retry-After', '1');
+    }
+    if (problem.status === 401) {
+      response.setHeader('WWW-Authenticate', 'Bearer');
     }
     response
       .status(problem.status)

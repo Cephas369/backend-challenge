@@ -2,22 +2,71 @@
 
 Este documento registra as decisões técnicas do Distributed Wagering Processor à medida que são tomadas: o contexto, a escolha e o que ela implica.
 
-**Estado atual:** os 8 cenários de concorrência da seção 13 passam com paralelismo real, inclusive com processos reais morrendo no meio do caminho. O compose sobe 3 réplicas atrás de um nginx, com a aplicação conectada por um usuário de privilégio mínimo, e `/metrics` expõe as métricas da seção 12. Falta a documentação final.
+**Estado atual:**
+- Os 8 cenários de concorrência da seção 13 passam com paralelismo real, inclusive com processos reais morrendo no meio do caminho.
+- O compose sobe 3 réplicas atrás de um nginx, com a aplicação conectada por um usuário de privilégio mínimo, e `/metrics` expõe as métricas da seção 12.
+- A autenticação ficou de fora por decisão; o desenho e o ponto de extensão estão na [D26](#d26-autenticação).
+- O teste de carga (opcional) não foi feito. O que falta para produção está em [Limitações conhecidas e próximos passos](#limitações-conhecidas-e-próximos-passos).
+
+## Visão geral
+
+```mermaid
+flowchart LR
+  provedores([Provedores de jogos])
+  downstream([Consumidores de eventos])
+
+  subgraph compose [Docker Compose]
+    nginx[nginx]
+    subgraph replicas ["app × 3: mesma imagem, papéis por APP_ROLES"]
+      api[API HTTP]
+      consumer[Consumer SQS]
+      publisher[Publisher da outbox]
+      worker[Worker de referências pendentes]
+    end
+    pg[("PostgreSQL: wallets, ledger, transações, inbox, outbox")]
+    subgraph sqs [MiniStack SQS]
+      entrada[["wager-transactions.fifo"]]
+      dlq[["wager-transactions-dlq.fifo"]]
+      eventos[["wagering-events.fifo"]]
+    end
+  end
+
+  provedores -- HTTP --> nginx
+  nginx --> api
+  provedores -- mensagem --> entrada
+  entrada --> consumer
+  consumer -. "erro permanente ou tentativas esgotadas" .-> dlq
+  api --> pg
+  consumer --> pg
+  worker --> pg
+  publisher -- "lê a outbox" --> pg
+  publisher --> eventos
+  eventos --> downstream
+```
+
+1. **Mesmo use case:** uma transação entra por HTTP ou pela fila e passa pelo mesmo `SubmitWagerTransaction`.
+2. **Uma transação SQL:** a decisão, o lançamento no ledger, o saldo, a inbox e os eventos da outbox são gravados juntos no PostgreSQL.
+3. **Só depois do commit:** a mensagem da fila é confirmada, e os eventos saem pela outbox.
+4. **Coordenação no banco:** qualquer réplica processa qualquer transação. Quem coordena as instâncias é o banco (lock da wallet, unicidade, `SKIP LOCKED`), não a memória do processo.
 
 ## Estrutura
 
 ```
 src/
   domain/          TypeScript puro: money, wallet, wagering, events, messaging, shared
-  application/     use cases (wallets, wagering), portas (persistência, relógio, ids) e erros de aplicação
+  application/     use cases (wallets, wagering, messaging), portas (persistência, relógio, ids, métricas,
+                   identidade do provedor) e erros de aplicação
   infrastructure/  config, observabilidade, persistência (schema, mappers, repositórios, migrations), SQS
-  interfaces/      contratos de entrada (zod), HTTP (controllers, Problem Details, health),
+  interfaces/      contratos de entrada (zod), HTTP (controllers, Problem Details, health, guard do provedor),
                    messaging (consumer SQS, módulo dos workers), workers (laço de polling)
   use-cases.module.ts  raiz de composição: monta os use cases (classes sem Nest) com as portas concretas
 test/
   unit/            sem dependências externas
   integration/     PostgreSQL e MiniStack reais
+  concurrency/     paralelismo real e processos reais da aplicação
   support/         bancos e filas descartáveis, processo real da aplicação, waitFor
+scripts/           envio de mensagem de exemplo, leitura da DLQ e helpers da demonstração
+infra/             nginx e o usuário de banco da aplicação
 ```
 
 A regra de dependência (`domain ← application ← infrastructure/interfaces`) é verificada por [um teste de arquitetura](test/unit/architecture/boundaries.test.ts). O domínio e a aplicação não podem importar Nest, MikroORM, AWS SDK, pino, zod nem as camadas externas, inclusive em imports só de tipo.
@@ -73,7 +122,8 @@ Configuração adotada:
 
 - Os testes de integração usam PostgreSQL e MiniStack reais, sem mocks. Cada suíte cria um banco próprio e filas com nome único e remove tudo no fim. As filas não são reaproveitadas porque `PurgeQueue` só pode rodar a cada 60 s.
 - O teste de shutdown sobe a aplicação como processo real (`Bun.spawn`) e lê os logs JSON do stdout.
-- O Biome cuida do lint e da formatação, só em `src/`, `test/` e nos JSONs da raiz.
+- O Biome cuida do lint e da formatação, só em `src/`, `test/`, `scripts/` e nos JSONs da raiz.
+- Os testes não herdam o nível de log do `.env` de desenvolvimento: rodam em silêncio, a menos que `TEST_LOG_LEVEL` seja definido.
 - O CI (GitHub Actions) roda typecheck, lint e testes de unidade, e depois os testes de integração contra o compose.
 
 ### D7. Money em `bigint` de centavos
@@ -155,7 +205,7 @@ Erros de contrato não viram transação; na API eles viram respostas 400 com o 
 
 ### D12. Eventos, inbox e outbox no domínio
 
-- **Eventos:** `IntegrationEvent` é abstrata, com uma subclasse por evento que fixa `eventType` e `version` no tipo. `data` só leva `MoneyProps`, nunca `Money`, e é clonado e congelado. O `aggregateId` é o `transactionId` nos eventos de transação e o `walletId` no `WalletBalanceChanged`. Como o `MessageGroupId` da publicação será o `aggregateId`, a ordem por wallet se mantém onde importa; e a `walletVersion` no evento permite ordenar mesmo assim.
+- **Eventos:** `IntegrationEvent` é abstrata, com uma subclasse por evento que fixa `eventType` e `version` no tipo. `data` só leva `MoneyProps`, nunca `Money`, e é clonado e congelado. O `aggregateId` é o `transactionId` nos eventos de transação e o `walletId` no `WalletBalanceChanged`. Como o `MessageGroupId` da publicação é o `aggregateId`, a fila entrega na ordem de envio de cada wallet. Essa ordem pode trocar quando dois publishers pegam lotes diferentes ou um envio é repetido. Por isso o evento leva a `walletVersion`, com a qual o consumidor ordena e descarta o que for antigo.
 - **Outbox:** o id da mensagem é o `eventId`, então republicar carrega o mesmo id, e é por ele que o consumidor deduplica. A mensagem nasce devida e, a cada falha, `scheduleRetry()` aplica backoff exponencial com jitter. Não há limite de tentativas: evento confirmado nunca é descartado, e o atraso aparece como outbox lag. O último erro fica guardado, truncado.
 - **Inbox:** a mensagem é identificada por `(consumerName, messageId)` e só pode ser marcada como processada uma vez. `matchesPayload()` detecta reuso de `messageId` com outro conteúdo.
 
@@ -237,6 +287,8 @@ Um único mapeamento ([problem-details.ts](src/interfaces/http/problem-details.t
 | Aguardando referência | 202 | resultado |
 | Rejeitada por regra de negócio | 422 | resultado com `failureCode` |
 | Payload inválido | 400 | `VALIDATION_FAILED`, `INVALID_MONEY`, `KIND_NOT_ALLOWED`, `REFERENCE_REQUIRED`, `IDEMPOTENCY_KEY_REQUIRED`, `MALFORMED_REQUEST`… |
+| Sem credencial válida (só com IdP, ver D26) | 401 + `WWW-Authenticate: Bearer` | `UNAUTHENTICATED` |
+| Operação em nome de outro provedor (só com IdP) | 403 | `PROVIDER_MISMATCH` |
 | Não encontrado | 404 | `WALLET_NOT_FOUND`, `TRANSACTION_NOT_FOUND`, `ROUTE_NOT_FOUND` |
 | Conflito | 409 | `IDEMPOTENCY_KEY_REUSED`, `EXTERNAL_ID_CONFLICT`, `WALLET_ALREADY_EXISTS` |
 | Falha transitória | 503 + `Retry-After: 1` | `LOCK_TIMEOUT`, `DATABASE_UNAVAILABLE`, `CONCURRENCY_CONFLICT` |
@@ -327,6 +379,28 @@ Um único mapeamento ([problem-details.ts](src/interfaces/http/problem-details.t
 
 O que só o use case enxerga (em que camada a duplicata foi detectada, conflitos e repetições internas) passa por uma porta mínima da aplicação, `WageringMetrics`. O resto é contado nas bordas. As métricas padrão de processo do `prom-client` também são expostas. Um gauge que falha ao ler (banco ou SQS fora) não derruba o scrape.
 
+### D26. Autenticação
+
+**Não implementada, por decisão.** O enunciado diz que autenticação não pontua e não deve competir com correção financeira, concorrência e idempotência (seção 2). Ficaram o desenho e um ponto de extensão testado.
+
+**Desenho que seria adotado:**
+- **IdP:** Keycloak (ou Zitadel) no compose, com um client OAuth 2.0 *client credentials* por provedor. O provedor troca `client_id` e `client_secret` por um JWT de vida curta e o envia em `Authorization: Bearer`.
+- **Validação:** a API confere assinatura, emissor, audiência e expiração com as chaves do JWKS do IdP, guardadas em cache e renovadas quando a chave muda. Não há chamada ao IdP por requisição. O `providerId` vem de uma claim do token (por exemplo `provider_id`, mapeada no client).
+- **Respostas:**
+  - sem token ou com token inválido: 401 `UNAUTHENTICATED`, com `WWW-Authenticate: Bearer`;
+  - operação ou consulta em nome de outro provedor: 403 `PROVIDER_MISMATCH`;
+  - consulta por id de uma transação de outro provedor: 404, para não revelar que ela existe.
+- **O que fica fora da autenticação de provedor:**
+  - health checks e `/metrics` ficam abertos, como pede o enunciado; `/metrics` seria protegido pela rede;
+  - as rotas de wallet também exigiriam token, mas de um client do operador (back-office), com escopo próprio. Criar wallet e reconciliar não são operações de provedor;
+  - a fila é um canal interno confiável, protegido por IAM. O `providerId` da mensagem continua sujeito às validações de domínio (provedor reservado, unicidade por provedor).
+
+**Ponto de extensão no código:**
+- **Porta:** [`ProviderIdentityPort`](src/application/ports/provider-identity.ts) recebe os headers e devolve a identidade do provedor, ou lança `ProviderAuthenticationError`. A implementação atual, `anonymousProviders`, devolve sempre `anonymous`.
+- **Guard:** [`ProviderAuthGuard`](src/interfaces/http/provider-auth.guard.ts) chama a porta nas rotas de transação, antes de validar o pedido. Os controllers conferem o escopo com `actsOnBehalfOf`.
+- **Como ligar:** implementar a porta (validação do JWT) e passá-la em `createApp(config, logger, { providerIdentity })`. Nada mais muda: 401, 403 e 404 já estão mapeados.
+- **Teste:** [provider-auth.test.ts](test/integration/http/provider-auth.test.ts) exercita esse caminho com uma identidade de teste no lugar do IdP.
+
 ## Interpretações adotadas
 
 Pontos que o enunciado deixa em aberto e como foram decididos:
@@ -346,3 +420,22 @@ Pontos que o enunciado deixa em aberto e como foram decididos:
 - **Referência que chega depois do TTL** encontra a transação dependente já `REJECTED`, e a dependente não é reaberta (estados terminais são imutáveis). O TTL é longo justamente para isso, e o caso fica visível pelo evento `WagerTransactionRejected`.
 
 - **Readiness inclui o SQS** porque o enunciado pede (seção 9). A API conseguiria aceitar transações com o SQS fora, já que os eventos ficam na outbox. Em produção, o readiness seria separado por papel (API, consumer, publisher).
+
+## Limitações conhecidas e próximos passos
+
+- **Autenticação:** não implementada; desenho e ponto de extensão na [D26](#d26-autenticação).
+- **Teste de carga:** é opcional e não foi feito, então não há números de throughput nem de latência.
+  - O limite conhecido é a hot wallet. As transações de uma mesma wallet são serializadas pelo lock da linha, e o throughput de uma wallet fica limitado pelo tempo que cada transação segura esse lock.
+  - Wallets diferentes escalam em paralelo.
+- **Retenção:** nada limpa a inbox nem a outbox publicada. Um job de expurgo precisaria:
+  - guardar a inbox por mais tempo que a retenção da fila, que é o prazo em que uma redelivery ainda pode chegar;
+  - guardar a outbox publicada pelo prazo de auditoria.
+- **DLQ sem ferramenta de reprocessamento:** a mensagem leva motivo e detalhe nos atributos, mas o reenvio é manual. Reenviar com o mesmo `messageId` é seguro, porque a inbox reconhece o que já foi aplicado.
+- **Eventos:** a entrega é at-least-once e a ordem de envio não é estrita (D12). Quem consome `wagering-events.fifo` precisa deduplicar por `eventId` e ordenar pela `walletVersion`.
+- **Moedas:** a escala é fixa em 2 casas para todas as moedas. Moedas com 0 ou 3 casas (JPY, KWD) precisariam de uma tabela de escala por moeda.
+- **Readiness único:** inclui o SQS mesmo para a API (ver trade-offs). Em produção, cada papel teria o seu.
+- **Ambiente de demonstração, não de produção:**
+  - **Segredos:** as senhas são fixas no compose e no `.env.example`; em produção viriam de um cofre de segredos.
+  - **Borda:** há um único nginx na frente das réplicas, sem TLS.
+  - **Observabilidade:** não há Prometheus, Grafana nem tracing distribuído. Cada instância expõe o próprio `/metrics`, e a correlação entre logs é feita pelo `correlationId`.
+  - **Deploy:** as migrations rodam num job antes das réplicas. Num deploy contínuo, as mudanças de schema seguiriam expand/contract.

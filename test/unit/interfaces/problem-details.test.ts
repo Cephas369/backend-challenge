@@ -10,9 +10,11 @@ import {
   WalletAlreadyExistsError,
   WalletNotFoundError,
 } from '../../../src/application/errors';
+import { ProviderAuthenticationError } from '../../../src/application/ports/provider-identity';
 import { InvalidMoneyError } from '../../../src/domain/money/money';
 import { InvalidWagerTransactionError } from '../../../src/domain/wagering/wager-transaction';
 import { problemFor } from '../../../src/interfaces/http/problem-details';
+import { actsOnBehalfOf, ProviderMismatchError } from '../../../src/interfaces/http/provider-auth.guard';
 import {
   decodeLedgerCursor,
   encodeLedgerCursor,
@@ -45,6 +47,8 @@ describe('mapeamento de erro para HTTP', () => {
       false,
     ],
     ['campo vazio', new InvalidWagerTransactionError('MISSING_FIELD', 'x'), 400, 'VALIDATION_FAILED', false],
+    ['sem credencial válida', new ProviderAuthenticationError('x'), 401, 'UNAUTHENTICATED', false],
+    ['provedor diferente do autenticado', new ProviderMismatchError(), 403, 'PROVIDER_MISMATCH', false],
     ['wallet inexistente', new WalletNotFoundError('w'), 404, 'WALLET_NOT_FOUND', false],
     ['transação inexistente', new TransactionNotFoundError('x'), 404, 'TRANSACTION_NOT_FOUND', false],
     ['key reusada', new IdempotencyConflictError('t'), 409, 'IDEMPOTENCY_KEY_REUSED', false],
@@ -90,5 +94,14 @@ describe('parseMoney', () => {
         { path: 'initialBalance', message: 'TOO_MANY_DECIMALS' },
       ]);
     }
+  });
+});
+
+describe('ponto de extensão da autenticação', () => {
+  test('sem IdP vale o payload; autenticado, só em nome de si mesmo; sem o guard, recusa', () => {
+    expect(actsOnBehalfOf('anonymous', 'provider-a')).toBe(true);
+    expect(actsOnBehalfOf(undefined, 'provider-a')).toBe(false);
+    expect(actsOnBehalfOf({ providerId: 'provider-a' }, 'provider-a')).toBe(true);
+    expect(actsOnBehalfOf({ providerId: 'provider-b' }, 'provider-a')).toBe(false);
   });
 });

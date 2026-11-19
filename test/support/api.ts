@@ -1,4 +1,5 @@
 import type { NestExpressApplication } from '@nestjs/platform-express';
+import type { ProviderIdentityPort } from '../../src/application/ports/provider-identity';
 import { createApp, listeningPort } from '../../src/bootstrap';
 import { createLogger } from '../../src/infrastructure/observability/logger';
 import { buildTestConfig } from './config';
@@ -75,7 +76,7 @@ export function wagerBody(wallet: WalletBody, overrides: Record<string, unknown>
  */
 export async function startTestApi(
   label: string,
-  environment: { lockTimeoutMs?: number } = {},
+  environment: { lockTimeoutMs?: number; providerIdentity?: ProviderIdentityPort } = {},
 ): Promise<TestApi> {
   const db = await createMigratedDatabase(label);
   const config = buildTestConfig({
@@ -83,7 +84,11 @@ export async function startTestApi(
     ...(environment.lockTimeoutMs === undefined ? {} : { lockTimeoutMs: environment.lockTimeoutMs }),
     roles: ['api'],
   });
-  const app: NestExpressApplication = await createApp(config, createLogger({ level: 'silent' }));
+  const app: NestExpressApplication = await createApp(
+    config,
+    createLogger({ level: 'silent' }),
+    environment.providerIdentity === undefined ? {} : { providerIdentity: environment.providerIdentity },
+  );
   await app.listen(0, '127.0.0.1');
   const baseUrl = `http://127.0.0.1:${listeningPort(app)}`;
 

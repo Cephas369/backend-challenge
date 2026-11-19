@@ -1,6 +1,7 @@
-import { Body, Controller, Get, Headers, Inject, Param, Post, Res } from '@nestjs/common';
-import type { Response } from 'express';
+import { Body, Controller, Get, Headers, Inject, Param, Post, Req, Res, UseGuards } from '@nestjs/common';
+import type { Request, Response } from 'express';
 import { z } from 'zod';
+import { TransactionNotFoundError } from '../../application/errors';
 import { SubmitWagerTransaction } from '../../application/wagering/submit-wager-transaction';
 import { GetWagerTransaction } from '../../application/wagering/wager-transaction-queries';
 import { addToLogContext } from '../../infrastructure/observability/log-context';
@@ -9,10 +10,12 @@ import { PrometheusMetrics } from '../../infrastructure/observability/metrics';
 import { LOGGER } from '../../infrastructure/tokens';
 import { idempotencyKeyContract, opaqueId, wagerTransactionContract } from '../contracts/wager-contracts';
 import { currentCorrelationId } from './correlation-id.middleware';
+import { actsOnBehalfOf, ProviderAuthGuard, ProviderMismatchError } from './provider-auth.guard';
 import { parseMoney, parseRequest, RequestValidationError } from './request-validation';
 import { httpStatusFor, transactionResponse, transactionResultResponse } from './views';
 
 @Controller()
+@UseGuards(ProviderAuthGuard)
 export class WageringController {
   constructor(
     private readonly submitTransaction: SubmitWagerTransaction,
@@ -30,6 +33,7 @@ export class WageringController {
     @Body() body: unknown,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Res({ passthrough: true }) response: Response,
+    @Req() request: Request,
   ) {
     if (idempotencyKey === undefined) {
       throw new RequestValidationError('IDEMPOTENCY_KEY_REQUIRED', 'o header Idempotency-Key é obrigatório', [
@@ -38,6 +42,9 @@ export class WageringController {
     }
     const key = parseRequest(idempotencyKeyContract, idempotencyKey, 'Idempotency-Key');
     const input = parseRequest(wagerTransactionContract, body, 'corpo');
+    if (!actsOnBehalfOf(request.providerIdentity, input.providerId)) {
+      throw new ProviderMismatchError();
+    }
     addToLogContext({ providerId: input.providerId, walletId: input.walletId });
 
     const startedAt = performance.now();
@@ -67,20 +74,30 @@ export class WageringController {
     return transactionResultResponse(result);
   }
 
+  /** A transação de outro provedor responde 404, como se não existisse: o id não revela nada. */
   @Get('wagering/transactions/:transactionId')
-  async byId(@Param('transactionId') transactionId: string) {
+  async byId(@Param('transactionId') transactionId: string, @Req() request: Request) {
     const id = parseRequest(z.uuid(), transactionId, 'transactionId');
-    return transactionResponse(await this.transactions.byId(id));
+    const transaction = await this.transactions.byId(id);
+    if (!actsOnBehalfOf(request.providerIdentity, transaction.providerId)) {
+      throw new TransactionNotFoundError(`transação ${id} não existe`);
+    }
+    return transactionResponse(transaction);
   }
 
   @Get('providers/:providerId/wagering/transactions/:externalTransactionId')
   async byExternalId(
     @Param('providerId') providerId: string,
     @Param('externalTransactionId') externalTransactionId: string,
+    @Req() request: Request,
   ) {
+    const provider = parseRequest(opaqueId(64), providerId, 'providerId');
+    if (!actsOnBehalfOf(request.providerIdentity, provider)) {
+      throw new ProviderMismatchError();
+    }
     return transactionResponse(
       await this.transactions.byExternalId(
-        parseRequest(opaqueId(64), providerId, 'providerId'),
+        provider,
         parseRequest(opaqueId(255), externalTransactionId, 'externalTransactionId'),
       ),
     );
